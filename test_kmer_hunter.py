@@ -565,5 +565,215 @@ class TestBwaFindExactMatches(unittest.TestCase):
         self.assertEqual(hits, [])
 
 
+# ── Poly-A kmer integration tests ─────────────────────────────────────────────
+
+# The 26 poly-A-prefixed k-mers from the issue.  Exact-match search must return
+# zero hits against a synthetic reference that lacks them, and must return at
+# least one hit when the reference explicitly contains them.
+_POLY_A_KMER_SEQS = [
+    "AAAAAAAAAAAAAAAAAAAAAAGCGGCCAGCT",
+    "AAAAAAAAAAAAAAAAAAAAAATGCGGTTCTC",
+    "AAAAAAAAAAAAAAAAAAAAAGCGGCCAGCTG",
+    "AAAAAAAAAAAAAAAAAAAAAGCTGCAATACT",
+    "AAAAAAAAAAAAAAAAAAAAAGGCACACGTAG",
+    "AAAAAAAAAAAAAAAAAAAAATTGGAGTCTGT",
+    "AAAAAAAAAAAAAAAAAAAAATTGGTCATAAG",
+    "AAAAAAAAAAAAAAAAAAAAGAACTCGGTGGT",
+    "AAAAAAAAAAAAAAAAAAAAGAATATTGTACT",
+    "AAAAAAAAAAAAAAAAAAAAGATATAATGCCT",
+    "AAAAAAAAAAAAAAAAAAAAGATGAGAGTATG",
+    "AAAAAAAAAAAAAAAAAAAAGCAGTGCAGGTA",
+    "AAAAAAAAAAAAAAAAAAAAGCGGCCAGCTGA",
+    "AAAAAAAAAAAAAAAAAAAAGCTGCAATACTG",
+    "AAAAAAAAAAAAAAAAAAAAGGCACACGTAGA",
+    "AAAAAAAAAAAAAAAAAAAAGGTATCCTAGTG",
+    "AAAAAAAAAAAAAAAAAAAAGTGCTTGAAATG",
+    "AAAAAAAAAAAAAAAAAAAATCAGAGTCAACT",
+    "AAAAAAAAAAAAAAAAAAAATGAAGTCACTAG",
+    "AAAAAAAAAAAAAAAAAAAATTGGAGTCTGTG",
+    "AAAAAAAAAAAAAAAAAAAATTGGTCATAAGA",
+    "AAAAAAAAAAAAAAAAAAACAGGAATGGCTCT",
+    "AAAAAAAAAAAAAAAAAAACCTTGTGTTTGGG",
+    "AAAAAAAAAAAAAAAAAAACGGAACATACAAA",
+    "AAAAAAAAAAAAAAAAAAACTAGGAATGTATT",
+    "AAAAAAAAAAAAAAAAAAAGAACTCGGTG",  # shorter: 29 bp
+]
+
+
+class TestPolyAKmerIntegration(unittest.TestCase):
+    """Comprehensive integration test for exact k-mer matching with poly-A prefix k-mers.
+
+    Verifies that:
+      - All 26 poly-A k-mers return zero hits against a reference that lacks them.
+      - Each k-mer individually returns zero hits (subTest coverage).
+      - Exact forward hits are found when the reference contains the k-mer.
+      - Hit coordinates are 1-based and accurate for poly-A k-mers.
+      - Reverse-complement strand hits are detected for poly-A k-mers.
+      - All 26 poly-A k-mers are found when embedded in a custom reference.
+      - The shorter 29-bp k-mer behaves consistently with the others.
+      - Hit dicts contain all required keys.
+      - bwa_find_exact_matches (with a mocked subprocess) returns a hit for a
+        poly-A k-mer whose SAM record satisfies the exact-match filter.
+    """
+
+    # Synthetic reference with no poly-A stretches — alternating short motifs
+    # that contain no run of more than one identical base.
+    _REF_NO_POLYA = {"chrY": "ACGTCGATCGTA" * 50 + "GCTAGCTAGCTA" * 30}
+
+    @staticmethod
+    def _make_kmers(seqs):
+        return [(f"kmer_{i + 1}", seq) for i, seq in enumerate(seqs)]
+
+    # ── no-hit tests ──────────────────────────────────────────────────────────
+
+    def test_no_hits_all_poly_a_kmers_against_simple_reference(self):
+        """All poly-A k-mers return zero hits against a reference without them."""
+        kmers = self._make_kmers(_POLY_A_KMER_SEQS)
+        hits = kh.find_exact_matches(kmers, self._REF_NO_POLYA)
+        self.assertEqual(hits, [], f"Expected 0 hits but got {len(hits)}")
+
+    def test_no_hits_each_poly_a_kmer_individually(self):
+        """Each poly-A k-mer individually returns zero hits against the simple reference."""
+        for i, seq in enumerate(_POLY_A_KMER_SEQS):
+            with self.subTest(kmer_index=i, seq=seq):
+                hits = kh.find_exact_matches(
+                    [(f"kmer_{i + 1}", seq)], self._REF_NO_POLYA
+                )
+                self.assertEqual(hits, [], f"kmer '{seq}' should have no hits")
+
+    # ── positive-hit tests ────────────────────────────────────────────────────
+
+    def test_forward_hit_when_reference_contains_poly_a_kmer(self):
+        """A forward hit is found when the reference explicitly contains a poly-A k-mer."""
+        target = _POLY_A_KMER_SEQS[0]
+        ref = {"chrY": "GCGCGCGCGCGC" + target + "CGCGCGCGCGCG"}
+        hits = kh.find_exact_matches([("kmer_1", target)], ref)
+        fwd = [h for h in hits if h["strand"] == "+"]
+        self.assertEqual(len(fwd), 1)
+        self.assertEqual(fwd[0]["seq"], target)
+        self.assertEqual(fwd[0]["kmer"], "kmer_1")
+
+    def test_hit_coordinates_are_one_based(self):
+        """Hit start/end positions are 1-based for a poly-A k-mer at a known offset."""
+        target = _POLY_A_KMER_SEQS[0]
+        prefix = "GCGCGCGCGCGC"  # 12 bases → k-mer starts at 1-based position 13
+        ref = {"chrY": prefix + target + "CGCGCGCGCGCG"}
+        hits = kh.find_exact_matches([("kmer_1", target)], ref)
+        fwd = [h for h in hits if h["strand"] == "+"]
+        self.assertEqual(len(fwd), 1)
+        self.assertEqual(fwd[0]["start"], len(prefix) + 1)
+        self.assertEqual(fwd[0]["end"], len(prefix) + len(target))
+
+    def test_reverse_complement_hit_for_poly_a_kmer(self):
+        """The reverse complement of a poly-A k-mer is detected on the minus strand."""
+        target = _POLY_A_KMER_SEQS[0]
+        rc = kh.reverse_complement(target)
+        # Place the RC in the reference so a minus-strand hit is expected.
+        ref = {"chrY": "GCGCGCGCGCGC" + rc + "CGCGCGCGCGCG"}
+        hits = kh.find_exact_matches([("kmer_1", target)], ref)
+        minus = [h for h in hits if h["strand"] == "-"]
+        self.assertGreater(len(minus), 0)
+
+    def test_all_poly_a_kmers_found_in_custom_reference(self):
+        """Every poly-A k-mer is found when each is embedded in a custom reference."""
+        separator = "GCGCGCGCGCGC"  # 12 bp of non-A/T content between k-mers
+        ref_seq = separator + separator.join(_POLY_A_KMER_SEQS) + separator
+        ref = {"chrY": ref_seq}
+        kmers = self._make_kmers(_POLY_A_KMER_SEQS)
+        hits = kh.find_exact_matches(kmers, ref)
+        kmer_fwd_hits = {h["kmer"] for h in hits if h["strand"] == "+"}
+        for i, seq in enumerate(_POLY_A_KMER_SEQS):
+            name = f"kmer_{i + 1}"
+            with self.subTest(kmer=name, seq=seq):
+                self.assertIn(
+                    name, kmer_fwd_hits, f"No forward hit found for {name} ({seq!r})"
+                )
+
+    def test_shorter_poly_a_kmer_no_hit_then_positive_hit(self):
+        """The shorter 29-bp poly-A k-mer returns no hit, then a positive hit correctly."""
+        shorter = _POLY_A_KMER_SEQS[-1]
+        self.assertLess(len(shorter), len(_POLY_A_KMER_SEQS[0]))
+
+        # No hit in the reference without poly-A sequences.
+        hits_none = kh.find_exact_matches([("k_short", shorter)], self._REF_NO_POLYA)
+        self.assertEqual(hits_none, [])
+
+        # Positive hit when the reference contains the k-mer.
+        ref = {"chrY": "GCGCGCGCGCGCGCGC" + shorter + "CGCGCGCGCGCGCGCG"}
+        hits_some = kh.find_exact_matches([("k_short", shorter)], ref)
+        fwd = [h for h in hits_some if h["strand"] == "+"]
+        self.assertEqual(len(fwd), 1)
+
+    # ── hit dict structure ────────────────────────────────────────────────────
+
+    def test_hit_dict_contains_required_keys_for_poly_a_kmer(self):
+        """Each hit dict for a poly-A k-mer contains all required keys."""
+        target = _POLY_A_KMER_SEQS[0]
+        ref = {"chrY": "GCGCGCGCGCGC" + target + "CGCGCGCGCGCG"}
+        hits = kh.find_exact_matches([("kmer_1", target)], ref)
+        self.assertTrue(hits)
+        expected_keys = {"kmer", "seq", "chrom", "start", "end", "strand", "region"}
+        for hit in hits:
+            with self.subTest(hit=hit):
+                self.assertEqual(set(hit.keys()), expected_keys)
+
+    # ── BWA pipeline integration (mocked subprocess) ──────────────────────────
+
+    def test_bwa_find_exact_matches_returns_poly_a_kmer_hit(self):
+        """bwa_find_exact_matches returns a hit for a poly-A k-mer via mocked BWA."""
+        import tempfile as _tempfile
+
+        target = _POLY_A_KMER_SEQS[0]
+        klen = len(target)
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            ref = Path(tmpdir) / "ref.fa"
+            _write_plain_fasta(ref, {"chrY": "GCGCGCGCGCGC" + target + "CGCGCGCGCGCG"})
+            # Pre-create the .bwt sentinel so ensure_bwa_index skips indexing.
+            Path(str(ref) + ".bwt").write_text("")
+
+            sam_output = (
+                "@HD\tVN:1.6\n"
+                f"kmer_1\t0\tchrY\t13\t60\t{klen}M\t*\t0\t0\t{target}\t*\tNM:i:0\n"
+            )
+            mock_mem = MagicMock()
+            mock_mem.returncode = 0
+            mock_mem.stdout = sam_output
+
+            with patch("subprocess.run", return_value=mock_mem):
+                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["kmer"], "kmer_1")
+        self.assertEqual(hits[0]["start"], 13)
+        self.assertEqual(hits[0]["end"], 12 + klen)
+        self.assertEqual(hits[0]["strand"], "+")
+
+    def test_bwa_find_exact_matches_no_poly_a_kmer_hit_when_sam_empty(self):
+        """bwa_find_exact_matches returns no hits when SAM has no alignments."""
+        import tempfile as _tempfile
+
+        target = _POLY_A_KMER_SEQS[0]
+
+        with _tempfile.TemporaryDirectory() as tmpdir:
+            ref = Path(tmpdir) / "ref.fa"
+            _write_plain_fasta(ref, {"chrY": "ACGTCGATCGTA" * 50})
+            Path(str(ref) + ".bwt").write_text("")
+
+            # SAM with only unmapped record (flag 4) — no exact hit.
+            sam_output = (
+                "@HD\tVN:1.6\n"
+                f"kmer_1\t4\t*\t0\t0\t*\t*\t0\t0\t{target}\t*\n"
+            )
+            mock_mem = MagicMock()
+            mock_mem.returncode = 0
+            mock_mem.stdout = sam_output
+
+            with patch("subprocess.run", return_value=mock_mem):
+                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+
+        self.assertEqual(hits, [])
+
+
 if __name__ == "__main__":
     unittest.main()
