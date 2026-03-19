@@ -1,0 +1,756 @@
+#!/usr/bin/env python3
+"""
+kmer_hunter: Exact k-mer search against T2T CHM13v2.0 chrY with
+an interactive Plotly HTML report showing PAR/XTR regions on a karyogram.
+
+All matches are EXACT — zero mismatches, zero gaps.
+Both forward and reverse-complement strands are searched.
+"""
+
+import argparse
+import gzip
+import os
+import re
+import sys
+import urllib.request
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.io import to_html
+
+# ─── T2T chrY reference ──────────────────────────────────────────────────────
+
+T2T_CHRY_URL = (
+    "https://hgdownload.soe.ucsc.edu/goldenPath/hs1/chromosomes/chrY.fa.gz"
+)
+
+CHRY_LEN = 62_460_029  # T2T CHM13v2.0 (hs1) chrY length (bp)
+
+# ─── chrY functional-region annotations ──────────────────────────────────────
+# Coordinates: 1-based, inclusive.
+# Sources: Rhie et al. (2023) Nature (T2T-Y) and UCSC hs1 tracks.
+CHRY_REGIONS = [
+    {
+        "name": "PAR1",
+        "start": 1,
+        "end": 2_781_479,
+        "color": "#27ae60",
+        "description": "Pseudoautosomal Region 1 (Yp telomere)",
+    },
+    {
+        "name": "XTR",
+        "start": 2_781_480,
+        "end": 6_811_428,
+        "color": "#2980b9",
+        "description": "X-Transposed Region",
+    },
+    {
+        "name": "Ampliconic",
+        "start": 6_811_429,
+        "end": 26_200_000,
+        "color": "#8e44ad",
+        "description": "Ampliconic sequences (Yp/Yq)",
+    },
+    {
+        "name": "Pericentromeric",
+        "start": 26_200_001,
+        "end": 27_800_000,
+        "color": "#c0392b",
+        "description": "Pericentromeric / Centromere",
+    },
+    {
+        "name": "Heterochromatin",
+        "start": 27_800_001,
+        "end": 56_887_901,
+        "color": "#95a5a6",
+        "description": "Heterochromatin (DYZ1/DYZ2 satellites)",
+    },
+    {
+        "name": "PAR2",
+        "start": 56_887_902,
+        "end": 57_217_415,
+        "color": "#e67e22",
+        "description": "Pseudoautosomal Region 2 (Yq telomere)",
+    },
+    {
+        "name": "Distal Yq",
+        "start": 57_217_416,
+        "end": CHRY_LEN,
+        "color": "#bdc3c7",
+        "description": "Distal Yq (T2T-resolved region)",
+    },
+]
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="kmer_hunter",
+        description=(
+            "Exact k-mer search against T2T CHM13v2.0 chrY.\n"
+            "All matches are perfect (zero mismatches, zero gaps).\n"
+            "Generates an interactive HTML report with a chrY karyogram,\n"
+            "PAR/XTR region annotations, and a detailed hit table."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "kmers",
+        metavar="KMERS",
+        help="Input file: one k-mer per line (plain text) or FASTA format.",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="kmer_report.html",
+        metavar="PATH",
+        help="Output HTML report [default: kmer_report.html]",
+    )
+    parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to reference FASTA (.fa or .fa.gz). "
+            "Defaults to T2T CHM13v2.0 chrY, auto-downloaded to --cache-dir."
+        ),
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default=str(Path.home() / ".kmer_hunter_cache"),
+        metavar="DIR",
+        help="Cache directory for downloaded reference [default: ~/.kmer_hunter_cache]",
+    )
+    return parser.parse_args()
+
+
+# ─── Sequence utilities ───────────────────────────────────────────────────────
+
+_COMPLEMENT = str.maketrans("ACGTacgtNn", "TGCAtgcaNn")
+
+
+def reverse_complement(seq: str) -> str:
+    return seq.translate(_COMPLEMENT)[::-1]
+
+
+# ─── Input parsing ────────────────────────────────────────────────────────────
+
+
+def read_kmers(path: str) -> list[tuple[str, str]]:
+    """Read k-mers from a plain-text (one per line) or FASTA file.
+
+    Returns a list of (name, sequence) tuples.
+    """
+    text = Path(path).read_text()
+    lines = text.strip().splitlines()
+
+    if not lines:
+        sys.exit(f"[kmer_hunter] ERROR: Input file is empty: {path}")
+
+    kmers: list[tuple[str, str]] = []
+
+    if lines[0].startswith(">"):
+        # FASTA format
+        name: str | None = None
+        parts: list[str] = []
+        for line in lines:
+            if line.startswith(">"):
+                if name is not None:
+                    kmers.append((name, "".join(parts).upper()))
+                name = line[1:].split()[0]
+                parts = []
+            else:
+                parts.append(line.strip())
+        if name is not None:
+            kmers.append((name, "".join(parts).upper()))
+    else:
+        # Plain-text, one k-mer per line
+        for i, line in enumerate(lines, start=1):
+            seq = line.strip()
+            if seq and not seq.startswith("#"):
+                kmers.append((f"kmer_{i}", seq.upper()))
+
+    if not kmers:
+        sys.exit(f"[kmer_hunter] ERROR: No k-mers found in: {path}")
+
+    return kmers
+
+
+# ─── Reference genome ─────────────────────────────────────────────────────────
+
+
+def ensure_reference(reference: str | None, cache_dir: str) -> str:
+    """Return a path to the reference FASTA, downloading if necessary."""
+    if reference:
+        if not Path(reference).exists():
+            sys.exit(f"[kmer_hunter] ERROR: Reference not found: {reference}")
+        return reference
+
+    cache = Path(cache_dir)
+    cache.mkdir(parents=True, exist_ok=True)
+
+    ref_gz = cache / "chm13v2.0_chrY.fa.gz"
+
+    if ref_gz.exists():
+        print(f"[kmer_hunter] Using cached reference: {ref_gz}", file=sys.stderr)
+        return str(ref_gz)
+
+    print(
+        f"[kmer_hunter] Downloading T2T CHM13v2.0 chrY → {ref_gz}",
+        file=sys.stderr,
+    )
+    print(f"[kmer_hunter] URL: {T2T_CHRY_URL}", file=sys.stderr)
+
+    try:
+        urllib.request.urlretrieve(T2T_CHRY_URL, str(ref_gz))
+    except Exception as exc:
+        sys.exit(f"[kmer_hunter] ERROR: Download failed: {exc}")
+
+    return str(ref_gz)
+
+
+def read_fasta(path: str) -> dict[str, str]:
+    """Read a FASTA file (plain or .gz) into {chrom: sequence} (uppercase)."""
+    opener = gzip.open if path.endswith(".gz") else open
+    sequences: dict[str, str] = {}
+    name: str | None = None
+    parts: list[str] = []
+
+    with opener(path, "rt") as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line.startswith(">"):
+                if name is not None:
+                    sequences[name] = "".join(parts)
+                name = line[1:].split()[0]
+                parts = []
+            else:
+                parts.append(line.upper())
+
+    if name is not None:
+        sequences[name] = "".join(parts)
+
+    return sequences
+
+
+# ─── Exact matching ───────────────────────────────────────────────────────────
+
+
+def annotate_region(chrom: str, pos: int) -> str:
+    """Return the functional region name for a chrY 1-based position."""
+    if chrom != "chrY":
+        return chrom  # report the chromosome name for non-chrY hits
+    for region in CHRY_REGIONS:
+        if region["start"] <= pos <= region["end"]:
+            return region["name"]
+    return "Unknown"
+
+
+def find_exact_matches(
+    kmers: list[tuple[str, str]],
+    ref_seqs: dict[str, str],
+) -> list[dict]:
+    """Find all exact (zero-mismatch, zero-gap) occurrences of each k-mer.
+
+    Both forward (+) and reverse-complement (−) strands are searched.
+    Overlapping matches are included.
+    """
+    hits: list[dict] = []
+    total = len(kmers)
+
+    for idx, (kmer_name, kmer_seq) in enumerate(kmers, start=1):
+        kmer_upper = kmer_seq.upper()
+        kmer_rc = reverse_complement(kmer_upper)
+        kmer_len = len(kmer_upper)
+
+        print(
+            f"[kmer_hunter]  [{idx}/{total}] searching for {kmer_name} ({kmer_len} bp) …",
+            file=sys.stderr,
+        )
+
+        for chrom, chrom_seq in ref_seqs.items():
+            # ── Forward strand (overlapping via lookahead) ────────────────
+            pattern_fwd = f"(?=({re.escape(kmer_upper)}))"
+            for m in re.finditer(pattern_fwd, chrom_seq):
+                start = m.start() + 1  # convert to 1-based
+                hits.append(
+                    {
+                        "kmer": kmer_name,
+                        "seq": kmer_seq,
+                        "chrom": chrom,
+                        "start": start,
+                        "end": start + kmer_len - 1,
+                        "strand": "+",
+                        "region": annotate_region(chrom, start),
+                    }
+                )
+
+            # ── Reverse-complement strand ─────────────────────────────────
+            if kmer_rc != kmer_upper:  # skip palindromes (already counted)
+                pattern_rev = f"(?=({re.escape(kmer_rc)}))"
+                for m in re.finditer(pattern_rev, chrom_seq):
+                    start = m.start() + 1
+                    hits.append(
+                        {
+                            "kmer": kmer_name,
+                            "seq": kmer_seq,
+                            "chrom": chrom,
+                            "start": start,
+                            "end": start + kmer_len - 1,
+                            "strand": "-",
+                            "region": annotate_region(chrom, start),
+                        }
+                    )
+
+    return hits
+
+
+# ─── Plotly figures ───────────────────────────────────────────────────────────
+
+
+def build_karyogram(hits_df: pd.DataFrame) -> go.Figure:
+    """Interactive chrY karyogram with PAR/XTR bands and hit markers."""
+    fig = go.Figure()
+
+    # Chromosome body (background bar)
+    fig.add_shape(
+        type="rect",
+        x0=0,
+        x1=CHRY_LEN,
+        y0=-0.35,
+        y1=0.35,
+        fillcolor="#ecf0f1",
+        line=dict(color="#bdc3c7", width=1.5),
+        layer="below",
+    )
+
+    # Functional region bands
+    for region in CHRY_REGIONS:
+        fig.add_shape(
+            type="rect",
+            x0=region["start"],
+            x1=region["end"],
+            y0=-0.35,
+            y1=0.35,
+            fillcolor=region["color"],
+            opacity=0.80,
+            line=dict(width=0),
+        )
+        # Label wide regions
+        width = region["end"] - region["start"]
+        if width > 1_500_000:
+            fig.add_annotation(
+                x=(region["start"] + region["end"]) / 2,
+                y=0.48,
+                text=f'<b>{region["name"]}</b>',
+                showarrow=False,
+                font=dict(size=9, color="#2c3e50"),
+                xanchor="center",
+            )
+
+    # Invisible scatter traces for the legend
+    for region in CHRY_REGIONS:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(size=13, color=region["color"], symbol="square"),
+                name=region["name"],
+                hoverinfo="skip",
+                showlegend=True,
+            )
+        )
+
+    # k-mer hit markers
+    chry_hits = (
+        hits_df[hits_df["chrom"] == "chrY"]
+        if not hits_df.empty
+        else pd.DataFrame()
+    )
+
+    if not chry_hits.empty:
+        midpoints = (chry_hits["start"] + chry_hits["end"]) / 2
+        hover_texts = [
+            (
+                f"<b>{row['kmer']}</b><br>"
+                f"Position: chrY:{row['start']:,}–{row['end']:,}<br>"
+                f"Strand: {row['strand']}<br>"
+                f"Region: {row['region']}<br>"
+                f"Sequence: <code>{row['seq']}</code>"
+            )
+            for _, row in chry_hits.iterrows()
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=midpoints,
+                y=[0.0] * len(chry_hits),
+                mode="markers",
+                marker=dict(
+                    symbol="triangle-down",
+                    size=14,
+                    color="#e74c3c",
+                    line=dict(color="#c0392b", width=1),
+                ),
+                text=hover_texts,
+                hovertemplate="%{text}<extra></extra>",
+                name="k-mer hit (exact)",
+                showlegend=True,
+            )
+        )
+
+    fig.update_layout(
+        title=dict(
+            text="chrY Karyogram — Exact k-mer Hit Locations",
+            font=dict(size=16),
+        ),
+        xaxis=dict(
+            title="chrY position (bp)",
+            tickformat=",",
+            range=[-500_000, CHRY_LEN + 500_000],
+            showgrid=False,
+        ),
+        yaxis=dict(visible=False, range=[-1.4, 0.9]),
+        height=300,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="right",
+            x=1,
+            font=dict(size=10),
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(t=80, b=50, l=20, r=20),
+    )
+    return fig
+
+
+def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
+    """Bar chart: number of exact hits per chrY functional region."""
+    chry_hits = (
+        hits_df[hits_df["chrom"] == "chrY"]
+        if not hits_df.empty
+        else pd.DataFrame()
+    )
+
+    region_names = [r["name"] for r in CHRY_REGIONS]
+    region_colors = {r["name"]: r["color"] for r in CHRY_REGIONS}
+    counts = {r: 0 for r in region_names}
+
+    if not chry_hits.empty:
+        for region, cnt in chry_hits["region"].value_counts().items():
+            if region in counts:
+                counts[region] = int(cnt)
+
+    fig = go.Figure(
+        go.Bar(
+            x=region_names,
+            y=[counts[r] for r in region_names],
+            marker_color=[region_colors[r] for r in region_names],
+            text=[counts[r] for r in region_names],
+            textposition="auto",
+            hovertemplate="<b>%{x}</b><br>Hits: %{y}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Exact k-mer Hits by chrY Functional Region",
+        xaxis_title="Region",
+        yaxis_title="Number of Exact Hits",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=350,
+        margin=dict(t=60, b=50),
+    )
+    return fig
+
+
+def build_hit_table(hits_df: pd.DataFrame) -> go.Figure:
+    """Interactive sortable table of all exact hits."""
+    if hits_df.empty:
+        display = pd.DataFrame(
+            columns=["kmer", "chrom", "start", "end", "strand", "region", "seq"]
+        )
+    else:
+        display = hits_df[
+            ["kmer", "chrom", "start", "end", "strand", "region", "seq"]
+        ].copy()
+        display = display.sort_values(["chrom", "start"]).reset_index(drop=True)
+
+    region_colors = {r["name"]: r["color"] for r in CHRY_REGIONS}
+
+    # Per-column fill colours
+    fill_colors: list[list[str]] = []
+    for col in display.columns:
+        if col == "region":
+            fill_colors.append(
+                [region_colors.get(str(v), "#f8f9fa") for v in display[col]]
+            )
+        else:
+            fill_colors.append(["#f8f9fa"] * len(display))
+
+    fig = go.Figure(
+        go.Table(
+            header=dict(
+                values=[f"<b>{c}</b>" for c in display.columns],
+                fill_color="#2c3e50",
+                font=dict(color="white", size=12),
+                align="left",
+                height=32,
+            ),
+            cells=dict(
+                values=[display[c] for c in display.columns],
+                fill_color=fill_colors,
+                align="left",
+                font=dict(size=11),
+                height=28,
+            ),
+        )
+    )
+    fig.update_layout(
+        title="Exact Alignment Details",
+        height=max(220, 35 * len(display) + 70),
+        margin=dict(t=60, b=20),
+    )
+    return fig
+
+
+# ─── HTML report ──────────────────────────────────────────────────────────────
+
+
+def generate_html(
+    karyogram: go.Figure,
+    region_bar: go.Figure,
+    hit_table: go.Figure,
+    hits_df: pd.DataFrame,
+    all_kmers: list[tuple[str, str]],
+    output_path: str,
+) -> None:
+    """Combine figures into a single self-contained HTML report."""
+    total_kmers = len(all_kmers)
+    total_hits = len(hits_df)
+    kmers_with_hits = hits_df["kmer"].nunique() if not hits_df.empty else 0
+    kmers_no_hits = total_kmers - kmers_with_hits
+
+    chry_hits = (
+        hits_df[hits_df["chrom"] == "chrY"] if not hits_df.empty else pd.DataFrame()
+    )
+    par1_hits = int((chry_hits["region"] == "PAR1").sum()) if not chry_hits.empty else 0
+    xtr_hits = int((chry_hits["region"] == "XTR").sum()) if not chry_hits.empty else 0
+    par2_hits = int((chry_hits["region"] == "PAR2").sum()) if not chry_hits.empty else 0
+
+    karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
+    region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
+    hit_table_html = to_html(hit_table, full_html=False, include_plotlyjs=False)
+
+    region_pills = "".join(
+        f'<span class="region-pill" style="background:{r["color"]}" '
+        f'title="{r["description"]}">{r["name"]}</span>'
+        for r in CHRY_REGIONS
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>kmer_hunter Report</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f0f2f5;
+      color: #2c3e50;
+      margin: 0;
+      padding: 0;
+    }}
+    .header {{
+      background: linear-gradient(135deg, #1a252f 0%, #2980b9 100%);
+      color: #fff;
+      padding: 2.5rem 2rem 2rem;
+      text-align: center;
+    }}
+    .header h1 {{ margin: 0 0 0.4rem; font-size: 2.2rem; letter-spacing: -0.5px; }}
+    .header p  {{ margin: 0; opacity: 0.85; font-size: 0.95rem; }}
+    .badge {{
+      display: inline-block;
+      background: rgba(255,255,255,0.18);
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 999px;
+      padding: 0.2rem 0.8rem;
+      font-size: 0.78rem;
+      margin-top: 0.6rem;
+      letter-spacing: 0.04em;
+    }}
+    .container {{ max-width: 1400px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }}
+    .stats-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }}
+    .stat-card {{
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.2rem 1rem;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      text-align: center;
+    }}
+    .stat-card .value {{
+      font-size: 2.4rem;
+      font-weight: 700;
+      color: #2980b9;
+      line-height: 1;
+    }}
+    .stat-card .label {{ font-size: 0.8rem; color: #7f8c8d; margin-top: 0.35rem; }}
+    .stat-card.par1 .value  {{ color: #27ae60; }}
+    .stat-card.xtr  .value  {{ color: #2980b9; }}
+    .stat-card.par2 .value  {{ color: #e67e22; }}
+    .stat-card.miss .value  {{ color: #95a5a6; }}
+    .card {{
+      background: #fff;
+      border-radius: 10px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      margin-bottom: 1.5rem;
+    }}
+    .card h2 {{ margin: 0 0 1rem; font-size: 1.1rem; color: #2c3e50; }}
+    .region-legend {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }}
+    .region-pill {{
+      display: inline-block;
+      padding: 0.22rem 0.7rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #fff;
+      cursor: default;
+    }}
+    footer {{
+      text-align: center;
+      padding: 1.5rem;
+      color: #95a5a6;
+      font-size: 0.8rem;
+    }}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🧬 kmer_hunter</h1>
+    <p>T2T CHM13v2.0 chrY — Exact k-mer Mapping Report</p>
+    <span class="badge">⚡ Exact matches only &mdash; zero mismatches, zero gaps</span>
+  </div>
+
+  <div class="container">
+
+    <!-- Summary stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="value">{total_kmers}</div>
+        <div class="label">Total k-mers</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">{total_hits}</div>
+        <div class="label">Total Exact Hits</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">{kmers_with_hits}</div>
+        <div class="label">k-mers Matched</div>
+      </div>
+      <div class="stat-card miss">
+        <div class="value">{kmers_no_hits}</div>
+        <div class="label">k-mers Not Found</div>
+      </div>
+      <div class="stat-card par1">
+        <div class="value">{par1_hits}</div>
+        <div class="label">PAR1 Hits</div>
+      </div>
+      <div class="stat-card xtr">
+        <div class="value">{xtr_hits}</div>
+        <div class="label">XTR Hits</div>
+      </div>
+      <div class="stat-card par2">
+        <div class="value">{par2_hits}</div>
+        <div class="label">PAR2 Hits</div>
+      </div>
+    </div>
+
+    <!-- Karyogram -->
+    <div class="card">
+      <h2>chrY Karyogram</h2>
+      <div class="region-legend">{region_pills}</div>
+      {karyogram_html}
+    </div>
+
+    <!-- Region bar chart -->
+    <div class="card">
+      <h2>Hits per Functional Region</h2>
+      {region_bar_html}
+    </div>
+
+    <!-- Hit table -->
+    <div class="card">
+      <h2>All Exact Hits</h2>
+      {hit_table_html}
+    </div>
+
+  </div>
+
+  <footer>
+    Generated by <strong>kmer_hunter</strong> &nbsp;|&nbsp;
+    Reference: T2T CHM13v2.0 (hs1) chrY &nbsp;|&nbsp;
+    Region annotations: Rhie&nbsp;et&nbsp;al.&nbsp;(2023)&nbsp;<em>Nature</em>
+  </footer>
+</body>
+</html>
+"""
+
+    Path(output_path).write_text(html, encoding="utf-8")
+    print(f"[kmer_hunter] Report written → {output_path}", file=sys.stderr)
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    args = parse_args()
+
+    # 1. Read k-mers
+    print(f"[kmer_hunter] Reading k-mers from: {args.kmers}", file=sys.stderr)
+    kmers = read_kmers(args.kmers)
+    print(f"[kmer_hunter] {len(kmers)} k-mer(s) loaded", file=sys.stderr)
+
+    # 2. Ensure reference genome
+    ref_path = ensure_reference(args.reference, args.cache_dir)
+
+    # 3. Load reference into memory
+    print(f"[kmer_hunter] Loading reference: {ref_path}", file=sys.stderr)
+    ref_seqs = read_fasta(ref_path)
+    chroms = ", ".join(ref_seqs)
+    print(f"[kmer_hunter] Chromosomes loaded: {chroms}", file=sys.stderr)
+
+    # 4. Exact matching
+    print("[kmer_hunter] Searching for exact matches …", file=sys.stderr)
+    hits = find_exact_matches(kmers, ref_seqs)
+    print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
+
+    hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
+        columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
+    )
+
+    # 5. Build figures
+    karyogram = build_karyogram(hits_df)
+    region_bar = build_region_bar(hits_df)
+    hit_table = build_hit_table(hits_df)
+
+    # 6. Generate HTML report
+    generate_html(karyogram, region_bar, hit_table, hits_df, kmers, args.output)
+    print("[kmer_hunter] Done!", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
