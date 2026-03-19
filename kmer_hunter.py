@@ -145,8 +145,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "Path to a full-genome FASTA (.fa or .fa.gz) used with --whole-genome "
-            "instead of auto-downloading T2T CHM13v2.0."
+            "Path to a full-genome FASTA used with --whole-genome "
+            "instead of auto-downloading T2T CHM13v2.0. "
+            "Any genome name is accepted (e.g. chm13v2.0.fa); "
+            "BWA index files (*.amb, *.ann, *.bwt, *.pac, *.sa) are "
+            "expected alongside the FASTA and will be built automatically "
+            "if absent."
         ),
     )
     return parser.parse_args()
@@ -234,18 +238,19 @@ def _extract_chrom(source_gz: str, chrom: str, dest_gz: str) -> None:
         raise ValueError(f"chromosome '{chrom}' not found in {source_gz}")
 
 
-def ensure_reference(reference: str | None, cache_dir: str) -> str:
+def ensure_reference(reference: str | None, cache_dir: str, whole_genome_reference: str | None = None) -> str:
     """Return a path to the reference FASTA, downloading the full T2T genome if needed.
 
     When no reference is provided the full T2T CHM13v2.0 genome is downloaded
     (or reused from cache) so that all chromosomes are available for BWA search.
+    If *whole_genome_reference* is given it is used instead of downloading.
     """
     if reference:
         if not Path(reference).exists():
             sys.exit(f"[kmer_hunter] ERROR: Reference not found: {reference}")
         return reference
 
-    return ensure_whole_genome_reference(None, cache_dir)
+    return ensure_whole_genome_reference(whole_genome_reference, cache_dir)
 
 
 def ensure_whole_genome_reference(reference: str | None, cache_dir: str) -> str:
@@ -1066,7 +1071,7 @@ def main() -> None:
     print(f"[kmer_hunter] {len(kmers)} k-mer(s) loaded", file=sys.stderr)
 
     # 2. Ensure reference genome (whole T2T genome by default)
-    ref_path = ensure_reference(args.reference, args.cache_dir)
+    ref_path = ensure_reference(args.reference, args.cache_dir, args.whole_genome_reference)
     print(f"[kmer_hunter] Reference: {ref_path}", file=sys.stderr)
 
     # 3. Search using BWA mem (exact matches, all chromosomes in one pass)
