@@ -1,2 +1,145 @@
 # kmer_hunter
-Find where kmers live in the reference genome
+
+Find exactly where k-mers live in the T2T CHM13v2.0 reference genome.
+
+## Overview
+
+`kmer_hunter` takes a list of k-mers, searches for **exact** (zero-mismatch,
+zero-gap) occurrences in the T2T CHM13v2.0 chrY sequence, and generates a
+visually rich, fully interactive HTML report containing:
+
+- 🗺️ **chrY karyogram** — interactive Plotly chart with colour-coded PAR1,
+  XTR, Ampliconic, Pericentromeric, Heterochromatin, PAR2 and Distal-Yq bands,
+  with hit markers that show kmer name, position and region on hover.
+- 📊 **Region bar chart** — exact hit counts per functional region.
+- 📋 **Hit table** — sortable table of every exact match with coordinates,
+  strand and region annotation.
+- 🔢 **Summary cards** — total k-mers, total hits, PAR1 / XTR / PAR2 hit counts.
+
+> **Exact matches only** — both forward and reverse-complement strands are
+> searched; overlapping occurrences are all reported.  No mismatches, no gaps,
+> no soft-clips.
+
+---
+
+## Quick start (Apptainer / Singularity)
+
+```bash
+apptainer run \
+  --bind $PWD:/data \
+  docker://ghcr.io/jlanej/kmer_hunter:latest \
+  /data/kmers.txt \
+  --output    /data/kmer_report.html \
+  --cache-dir /data/.kmer_cache
+```
+
+Open `kmer_report.html` in any browser — no server required.
+
+---
+
+## Input format
+
+**Plain text** — one k-mer per line:
+
+```
+ACGTACGTACGTACGTACGT
+TGCATGCATGCATGCATGCA
+GCTAGCTAGCTAGCTAGCTA
+```
+
+**FASTA** — standard FASTA:
+
+```
+>kmer_1
+ACGTACGTACGTACGTACGT
+>kmer_2
+TGCATGCATGCATGCATGCA
+```
+
+---
+
+## chrY region annotations
+
+| Region | Colour | Coordinates (T2T hs1, approx.) | Description |
+|---|---|---|---|
+| PAR1 | 🟢 Green | 1 – 2,781,479 | Pseudoautosomal Region 1 (Yp telomere) |
+| XTR | 🔵 Blue | 2,781,480 – 6,811,428 | X-Transposed Region |
+| Ampliconic | 🟣 Purple | 6,811,429 – 26,200,000 | Ampliconic sequences |
+| Pericentromeric | 🔴 Red | 26,200,001 – 27,800,000 | Pericentromeric / Centromere |
+| Heterochromatin | ⚫ Grey | 27,800,001 – 56,887,901 | Heterochromatin (DYZ1/DYZ2) |
+| PAR2 | 🟠 Orange | 56,887,902 – 57,217,415 | Pseudoautosomal Region 2 (Yq telomere) |
+| Distal Yq | 🔘 Light grey | 57,217,416 – 62,460,029 | Distal Yq (T2T-resolved) |
+
+Coordinates are approximate; based on Rhie et al. (2023) *Nature* and UCSC hs1
+genome browser tracks.
+
+---
+
+## Options
+
+```
+positional arguments:
+  KMERS                 Input file: one k-mer per line or FASTA format
+
+options:
+  -o / --output PATH    Output HTML report [default: kmer_report.html]
+  --reference PATH      Reference FASTA (.fa or .fa.gz). Defaults to T2T
+                        CHM13v2.0 chrY, auto-downloaded to --cache-dir.
+  --cache-dir DIR       Directory for cached reference genome
+                        [default: ~/.kmer_hunter_cache]
+```
+
+---
+
+## Reference genome caching
+
+On first run, `kmer_hunter` automatically downloads the T2T CHM13v2.0 chrY
+sequence (~16 MB compressed) from UCSC:
+
+```
+https://hgdownload.soe.ucsc.edu/goldenPath/hs1/chromosomes/chrY.fa.gz
+```
+
+Subsequent runs re-use the cached file.  When running inside a container,
+mount a host directory and pass `--cache-dir` so the download persists:
+
+```bash
+apptainer run \
+  --bind $PWD:/data \
+  docker://ghcr.io/jlanej/kmer_hunter:latest \
+  /data/kmers.txt \
+  --output    /data/kmer_report.html \
+  --cache-dir /data/.kmer_cache
+```
+
+---
+
+## Docker (without Apptainer)
+
+```bash
+docker run --rm \
+  -v $PWD:/data \
+  ghcr.io/jlanej/kmer_hunter:latest \
+  /data/kmers.txt \
+  --output    /data/kmer_report.html \
+  --cache-dir /data/.kmer_cache
+```
+
+---
+
+## Build from source
+
+```bash
+git clone https://github.com/jlanej/kmer_hunter
+cd kmer_hunter
+docker build -t kmer_hunter .
+docker run --rm -v $PWD:/data kmer_hunter /data/kmers.txt -o /data/report.html
+```
+
+---
+
+## References
+
+- Rhie A. et al. (2023) "The complete sequence of a human Y chromosome"
+  *Nature* 621, 344–354. <https://doi.org/10.1038/s41586-023-06457-y>
+- T2T CHM13v2.0 (hs1): <https://github.com/marbl/CHM13>
