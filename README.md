@@ -16,6 +16,13 @@ visually rich, fully interactive HTML report containing:
   strand and region annotation.
 - 🔢 **Summary cards** — total k-mers, total hits, PAR1 / XTR / PAR2 hit counts.
 
+With `--whole-genome`, the report additionally includes:
+
+- 🌐 **Non-chrY bar chart** — hit counts broken down by non-chrY chromosome.
+- 📋 **Non-chrY hit table** — all hits found outside chrY with chromosome,
+  coordinates, strand and k-mer sequence.
+- 🔢 **Non-chrY & chrY hit count cards** — at-a-glance comparison.
+
 > **Exact matches only** — both forward and reverse-complement strands are
 > searched; overlapping occurrences are all reported.  No mismatches, no gaps,
 > no soft-clips.
@@ -82,12 +89,54 @@ positional arguments:
   KMERS                 Input file: one k-mer per line or FASTA format
 
 options:
-  -o / --output PATH    Output HTML report [default: kmer_report.html]
-  --reference PATH      Reference FASTA (.fa or .fa.gz). Defaults to T2T
-                        CHM13v2.0 chrY, auto-downloaded to --cache-dir.
-  --cache-dir DIR       Directory for cached reference genome
-                        [default: ~/.kmer_hunter_cache]
+  -o / --output PATH              Output HTML report [default: kmer_report.html]
+  --reference PATH                Reference FASTA (.fa or .fa.gz). Defaults to T2T
+                                  CHM13v2.0 chrY, auto-downloaded to --cache-dir.
+  --cache-dir DIR                 Directory for cached reference genome
+                                  [default: ~/.kmer_hunter_cache]
+  --whole-genome                  Also search the full T2T CHM13v2.0 genome for
+                                  non-chrY hits. Auto-downloads hs1.fa.gz (~830 MB)
+                                  on first use unless --whole-genome-reference is set.
+  --whole-genome-reference PATH   Path to a full-genome FASTA used with
+                                  --whole-genome instead of auto-downloading.
 ```
+
+---
+
+## Whole-genome / non-chrY search
+
+Pass `--whole-genome` to determine whether any of your k-mers also hit
+chromosomes other than chrY.  This is useful for assessing chrY specificity.
+
+```bash
+apptainer run \
+  --bind $PWD:/data \
+  docker://ghcr.io/jlanej/kmer_hunter:latest \
+  /data/kmers.txt \
+  --output       /data/kmer_report.html \
+  --cache-dir    /data/.kmer_cache \
+  --whole-genome
+```
+
+On the first run this downloads the full T2T CHM13v2.0 genome (~830 MB
+compressed) from UCSC to `--cache-dir`; subsequent runs use the cached file.
+If you already have the genome locally, pass `--whole-genome-reference`:
+
+```bash
+kmer_hunter kmers.txt \
+  --whole-genome \
+  --whole-genome-reference /path/to/hs1.fa.gz \
+  -o report.html
+```
+
+The report will include two additional sections:
+
+1. **Non-chrY Hits by Chromosome** — bar chart of hit counts per chromosome
+   (excluding chrY).
+2. **Non-chrY Exact Hit Details** — full table of all hits outside chrY.
+
+Summary stat cards for **chrY Hits** and **Non-chrY Hits** are also added so
+the specificity of each k-mer is immediately visible.
 
 ---
 
@@ -98,6 +147,12 @@ sequence (~16 MB compressed) from UCSC:
 
 ```
 https://hgdownload.soe.ucsc.edu/goldenPath/hs1/chromosomes/chrY.fa.gz
+```
+
+When `--whole-genome` is used the full genome (~830 MB compressed) is cached:
+
+```
+https://hgdownload.soe.ucsc.edu/goldenPath/hs1/bigZips/hs1.fa.gz
 ```
 
 Subsequent runs re-use the cached file.  When running inside a container,
