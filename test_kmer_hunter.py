@@ -320,6 +320,37 @@ class TestEnsureReference(unittest.TestCase):
         # The downloaded file must be the whole-genome reference
         self.assertIn("chm13v2.0_hs1", Path(result).name)
 
+    def test_whole_genome_reference_used_when_no_reference(self):
+        """--whole-genome-reference is honoured when no --reference is given."""
+        ref = self.tmpdir / "chm13v2.0.fa"
+        _write_plain_fasta(ref, {"chr1": "ACGT", "chrY": "TTTT"})
+        with patch("urllib.request.urlretrieve") as mock_dl:
+            result = kh.ensure_reference(None, str(self.tmpdir / "cache"), str(ref))
+        mock_dl.assert_not_called()
+        self.assertEqual(result, str(ref))
+
+    def test_whole_genome_reference_any_name_accepted(self):
+        """Any genome filename is accepted for --whole-genome-reference."""
+        for name in ("chm13v2.0.fa", "genome.fasta", "my.genome.fa.gz", "hg38"):
+            ref = self.tmpdir / name
+            ref.write_bytes(b"")  # existence check only; BWA handles actual content
+            result = kh.ensure_reference(None, str(self.tmpdir / "cache"), str(ref))
+            self.assertEqual(result, str(ref))
+
+    def test_missing_whole_genome_reference_exits(self):
+        """A non-existent --whole-genome-reference path causes sys.exit."""
+        with self.assertRaises(SystemExit):
+            kh.ensure_reference(None, str(self.tmpdir), "/nonexistent/chm13v2.0.fa")
+
+    def test_reference_takes_priority_over_whole_genome_reference(self):
+        """When both --reference and --whole-genome-reference are given, --reference wins."""
+        ref = self.tmpdir / "chry.fa"
+        whole = self.tmpdir / "chm13v2.0.fa"
+        _write_plain_fasta(ref, {"chrY": "ACGT"})
+        _write_plain_fasta(whole, {"chr1": "TTTT", "chrY": "CCCC"})
+        result = kh.ensure_reference(str(ref), str(self.tmpdir / "cache"), str(whole))
+        self.assertEqual(result, str(ref))
+
 
 # ── ensure_bwa_index ──────────────────────────────────────────────────────────
 
