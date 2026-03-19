@@ -205,8 +205,41 @@ def read_kmers(path: str) -> list[tuple[str, str]]:
 # ─── Reference genome ─────────────────────────────────────────────────────────
 
 
+def _extract_chrom(source_gz: str, chrom: str, dest_gz: str) -> None:
+    """Stream a single chromosome from a gzipped FASTA into a new gzipped FASTA.
+
+    Raises ValueError if *chrom* is not found in *source_gz*.
+    The partially-written *dest_gz* is removed on failure.
+    """
+    found = False
+    in_target = False
+    try:
+        with gzip.open(source_gz, "rt") as src, gzip.open(dest_gz, "wt") as dst:
+            for line in src:
+                if line.startswith(">"):
+                    name = line[1:].split()[0]
+                    in_target = name == chrom
+                    if in_target:
+                        found = True
+                        dst.write(line)
+                elif in_target:
+                    dst.write(line)
+    except Exception:
+        Path(dest_gz).unlink(missing_ok=True)
+        raise
+    if not found:
+        Path(dest_gz).unlink(missing_ok=True)
+        raise ValueError(f"chromosome '{chrom}' not found in {source_gz}")
+
+
 def ensure_reference(reference: str | None, cache_dir: str) -> str:
-    """Return a path to the reference FASTA, downloading if necessary."""
+    """Return a path to the reference FASTA (chrY), downloading if necessary.
+
+    First tries a direct per-chromosome download from UCSC.  If that URL
+    returns an error (e.g. HTTP 404 — UCSC does not currently host per-
+    chromosome FASTAs for hs1), the function falls back to downloading the
+    full T2T CHM13v2.0 genome and streaming out just the chrY sequence.
+    """
     if reference:
         if not Path(reference).exists():
             sys.exit(f"[kmer_hunter] ERROR: Reference not found: {reference}")
@@ -221,16 +254,33 @@ def ensure_reference(reference: str | None, cache_dir: str) -> str:
         print(f"[kmer_hunter] Using cached reference: {ref_gz}", file=sys.stderr)
         return str(ref_gz)
 
+    # ── Attempt 1: per-chromosome URL ────────────────────────────────────────
     print(
         f"[kmer_hunter] Downloading T2T CHM13v2.0 chrY → {ref_gz}",
         file=sys.stderr,
     )
     print(f"[kmer_hunter] URL: {T2T_CHRY_URL}", file=sys.stderr)
-
     try:
         urllib.request.urlretrieve(T2T_CHRY_URL, str(ref_gz))
+        return str(ref_gz)
     except Exception as exc:
-        sys.exit(f"[kmer_hunter] ERROR: Download failed: {exc}")
+        ref_gz.unlink(missing_ok=True)
+        print(
+            f"[kmer_hunter] Per-chromosome download failed ({exc}); "
+            "falling back to whole-genome download to extract chrY.",
+            file=sys.stderr,
+        )
+
+    # ── Attempt 2: download full genome, then extract chrY ───────────────────
+    wg_path = ensure_whole_genome_reference(None, cache_dir)
+    print(
+        "[kmer_hunter] Extracting chrY from whole-genome reference …",
+        file=sys.stderr,
+    )
+    try:
+        _extract_chrom(wg_path, "chrY", str(ref_gz))
+    except Exception as exc:
+        sys.exit(f"[kmer_hunter] ERROR: Failed to extract chrY: {exc}")
 
     return str(ref_gz)
 
