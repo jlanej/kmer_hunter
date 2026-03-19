@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.kmer_hunter_cache/
+*.html
