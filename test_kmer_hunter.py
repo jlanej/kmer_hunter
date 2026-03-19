@@ -294,48 +294,244 @@ class TestEnsureReference(unittest.TestCase):
         with self.assertRaises(SystemExit):
             kh.ensure_reference("/nonexistent/ref.fa", str(self.tmpdir))
 
-    def test_cached_file_returned_without_download(self):
+    def test_cached_whole_genome_returned_without_download(self):
+        """Cached whole-genome file is reused - no download attempted."""
         cache = self.tmpdir / "cache"
         cache.mkdir()
-        cached = cache / "chm13v2.0_chrY.fa.gz"
-        _write_gz_fasta(cached, {"chrY": "ACGT"})
+        cached = cache / "chm13v2.0_hs1.fa.gz"
+        _write_gz_fasta(cached, {"chrY": "ACGT", "chr1": "TTTT"})
         with patch("urllib.request.urlretrieve") as mock_dl:
             result = kh.ensure_reference(None, str(cache))
         mock_dl.assert_not_called()
         self.assertEqual(result, str(cached))
 
-    def test_successful_per_chrom_download(self):
+    def test_no_reference_triggers_whole_genome_download(self):
+        """When no reference is provided the whole-genome URL is downloaded."""
         cache = self.tmpdir / "cache"
 
         def fake_download(url, dest):
-            _write_gz_fasta(Path(dest), {"chrY": "ACGT"})
+            _write_gz_fasta(Path(dest), {"chr1": "AAAA", "chrY": "CCCC"})
 
-        with patch("urllib.request.urlretrieve", side_effect=fake_download):
+        with patch("urllib.request.urlretrieve", side_effect=fake_download) as mock_dl:
             result = kh.ensure_reference(None, str(cache))
 
+        mock_dl.assert_called_once()
         self.assertTrue(Path(result).exists())
+        # The downloaded file must be the whole-genome reference
+        self.assertIn("chm13v2.0_hs1", Path(result).name)
 
-    def test_fallback_to_whole_genome_on_404(self):
-        """When the per-chromosome URL fails, chrY is extracted from the full genome."""
-        import urllib.error
 
-        cache = self.tmpdir / "cache"
-        cache.mkdir()
+# ── ensure_bwa_index ──────────────────────────────────────────────────────────
 
-        # Pre-populate the whole-genome cache file so ensure_whole_genome_reference
-        # returns it immediately without downloading.
-        wg_cached = cache / "chm13v2.0_hs1.fa.gz"
-        _write_gz_fasta(wg_cached, {"chr1": "AAAA" * 5, "chrY": "TTTT" * 5})
+class TestEnsureBwaIndex(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
 
-        def raise_404(url, dest):
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    def tearDown(self):
+        self.tmp.cleanup()
 
-        with patch("urllib.request.urlretrieve", side_effect=raise_404):
-            result = kh.ensure_reference(None, str(cache))
+    def test_skips_index_when_bwt_exists(self):
+        """If the .bwt sentinel file is present, bwa index must not be called."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chr1\nACGT\n")
+        bwt = Path(str(ref) + ".bwt")
+        bwt.write_text("")  # pre-existing index sentinel
 
-        chry = kh.read_fasta(result)
-        self.assertIn("chrY", chry)
-        self.assertEqual(chry["chrY"], "TTTT" * 5)
+        with patch("subprocess.run") as mock_run:
+            kh.ensure_bwa_index(str(ref))
+        mock_run.assert_not_called()
+
+    def test_builds_index_when_bwt_missing(self):
+        """When .bwt is absent, bwa index is invoked."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chr1\nACGT\n")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            kh.ensure_bwa_index(str(ref))
+
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("bwa", cmd[0])
+        self.assertIn("index", cmd)
+        self.assertIn(str(ref), cmd)
+
+    def test_exits_on_bwa_index_failure(self):
+        """A non-zero return code from bwa index causes sys.exit."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chr1\nACGT\n")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "some bwa error"
+
+        with patch("subprocess.run", return_value=mock_result):
+            with self.assertRaises(SystemExit):
+                kh.ensure_bwa_index(str(ref))
+
+
+# ── _parse_sam_exact ──────────────────────────────────────────────────────────
+
+class TestParseSamExact(unittest.TestCase):
+    def _sam(self, flag, chrom, pos, cigar, nm_val, qname="k1", seq="ACGTACGTAC"):
+        nm_field = f"NM:i:{nm_val}" if nm_val is not None else ""
+        return f"{qname}\t{flag}\t{chrom}\t{pos}\t60\t{cigar}\t*\t0\t0\t{seq}\t*\t{nm_field}\n"
+
+    def test_exact_forward_hit_parsed(self):
+        sam = "@HD\tVN:1.6\n" + self._sam(0, "chrY", 100, "10M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["chrom"], "chrY")
+        self.assertEqual(hits[0]["start"], 100)
+        self.assertEqual(hits[0]["end"], 109)
+        self.assertEqual(hits[0]["strand"], "+")
+        self.assertEqual(hits[0]["kmer"], "k1")
+
+    def test_reverse_strand_flag(self):
+        sam = self._sam(16, "chrY", 200, "10M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["strand"], "-")
+
+    def test_mismatch_skipped(self):
+        sam = self._sam(0, "chrY", 100, "10M", 1)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(hits, [])
+
+    def test_soft_clip_skipped(self):
+        sam = self._sam(0, "chrY", 100, "8M2S", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(hits, [])
+
+    def test_unmapped_skipped(self):
+        sam = self._sam(4, "*", 0, "*", None)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(hits, [])
+
+    def test_supplementary_skipped(self):
+        sam = self._sam(2048, "chrY", 100, "10M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(hits, [])
+
+    def test_wrong_cigar_length_skipped(self):
+        # k-mer is 10 bp but CIGAR says 5M
+        sam = self._sam(0, "chrY", 100, "5M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(hits, [])
+
+    def test_header_lines_ignored(self):
+        sam = "@HD\tVN:1.6\n@SQ\tSN:chrY\tLN:62460029\n" + self._sam(0, "chrY", 1, "10M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(len(hits), 1)
+
+    def test_result_keys(self):
+        sam = self._sam(0, "chrY", 1, "10M", 0)
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC"})
+        self.assertEqual(
+            set(hits[0].keys()), {"kmer", "seq", "chrom", "start", "end", "strand", "region"}
+        )
+
+    def test_multiple_hits(self):
+        sam = (
+            self._sam(0, "chrY", 10, "10M", 0, qname="k1")
+            + self._sam(0, "chr1", 50, "10M", 0, qname="k2", seq="TTTTTTTTTT")
+        )
+        hits = kh._parse_sam_exact(sam, {"k1": "ACGTACGTAC", "k2": "TTTTTTTTTT"})
+        self.assertEqual(len(hits), 2)
+
+
+# ── bwa_find_exact_matches ────────────────────────────────────────────────────
+
+class TestBwaFindExactMatches(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _mock_bwa(self, sam_output: str):
+        """Return mock subprocess.run results for bwa index then bwa mem calls.
+
+        Use this helper when the .bwt sentinel is absent so that ensure_bwa_index
+        will call bwa index first, followed by bwa mem.  When the sentinel already
+        exists (index reuse tests), patch subprocess.run with a single mock_mem
+        result instead.
+        """
+        mock_idx = MagicMock()
+        mock_idx.returncode = 0
+
+        mock_mem = MagicMock()
+        mock_mem.returncode = 0
+        mock_mem.stdout = sam_output
+        # First call = bwa index (when .bwt absent), second call = bwa mem
+        return [mock_idx, mock_mem]
+
+    def test_returns_hits_from_sam(self):
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+
+        sam = (
+            "@HD\tVN:1.6\n"
+            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        side_effects = self._mock_bwa(sam)
+        kmers = [("k1", "ACGTACGTAC")]
+
+        with patch("subprocess.run", side_effect=side_effects):
+            hits = kh.bwa_find_exact_matches(kmers, str(ref))
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["kmer"], "k1")
+        self.assertEqual(hits[0]["start"], 1)
+
+    def test_index_reused_when_bwt_exists(self):
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")  # pre-existing index
+
+        sam = "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        mock_mem = MagicMock()
+        mock_mem.returncode = 0
+        mock_mem.stdout = sam
+
+        with patch("subprocess.run", return_value=mock_mem) as mock_run:
+            hits = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
+
+        # Only bwa mem should have been called (index step was skipped)
+        self.assertEqual(mock_run.call_count, 1)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("mem", cmd)
+
+    def test_exits_on_bwa_mem_failure(self):
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGT\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = "bwa error"
+
+        with patch("subprocess.run", return_value=mock_fail):
+            with self.assertRaises(SystemExit):
+                kh.bwa_find_exact_matches([("k1", "ACGT")], str(ref))
+
+    def test_empty_kmers_returns_empty(self):
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGT\n")
+        Path(str(ref) + ".bwt").write_text("")
+
+        mock_mem = MagicMock()
+        mock_mem.returncode = 0
+        mock_mem.stdout = "@HD\tVN:1.6\n"
+
+        with patch("subprocess.run", return_value=mock_mem):
+            hits = kh.bwa_find_exact_matches([], str(ref))
+
+        self.assertEqual(hits, [])
 
 
 if __name__ == "__main__":

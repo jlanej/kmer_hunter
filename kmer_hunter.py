@@ -11,7 +11,9 @@ import argparse
 import gzip
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -233,56 +235,17 @@ def _extract_chrom(source_gz: str, chrom: str, dest_gz: str) -> None:
 
 
 def ensure_reference(reference: str | None, cache_dir: str) -> str:
-    """Return a path to the reference FASTA (chrY), downloading if necessary.
+    """Return a path to the reference FASTA, downloading the full T2T genome if needed.
 
-    First tries a direct per-chromosome download from UCSC.  If that URL
-    returns an error (e.g. HTTP 404 — UCSC does not currently host per-
-    chromosome FASTAs for hs1), the function falls back to downloading the
-    full T2T CHM13v2.0 genome and streaming out just the chrY sequence.
+    When no reference is provided the full T2T CHM13v2.0 genome is downloaded
+    (or reused from cache) so that all chromosomes are available for BWA search.
     """
     if reference:
         if not Path(reference).exists():
             sys.exit(f"[kmer_hunter] ERROR: Reference not found: {reference}")
         return reference
 
-    cache = Path(cache_dir)
-    cache.mkdir(parents=True, exist_ok=True)
-
-    ref_gz = cache / "chm13v2.0_chrY.fa.gz"
-
-    if ref_gz.exists():
-        print(f"[kmer_hunter] Using cached reference: {ref_gz}", file=sys.stderr)
-        return str(ref_gz)
-
-    # ── Attempt 1: per-chromosome URL ────────────────────────────────────────
-    print(
-        f"[kmer_hunter] Downloading T2T CHM13v2.0 chrY → {ref_gz}",
-        file=sys.stderr,
-    )
-    print(f"[kmer_hunter] URL: {T2T_CHRY_URL}", file=sys.stderr)
-    try:
-        urllib.request.urlretrieve(T2T_CHRY_URL, str(ref_gz))
-        return str(ref_gz)
-    except Exception as exc:
-        ref_gz.unlink(missing_ok=True)
-        print(
-            f"[kmer_hunter] Per-chromosome download failed ({exc}); "
-            "falling back to whole-genome download to extract chrY.",
-            file=sys.stderr,
-        )
-
-    # ── Attempt 2: download full genome, then extract chrY ───────────────────
-    wg_path = ensure_whole_genome_reference(None, cache_dir)
-    print(
-        "[kmer_hunter] Extracting chrY from whole-genome reference …",
-        file=sys.stderr,
-    )
-    try:
-        _extract_chrom(wg_path, "chrY", str(ref_gz))
-    except Exception as exc:
-        sys.exit(f"[kmer_hunter] ERROR: Failed to extract chrY: {exc}")
-
-    return str(ref_gz)
+    return ensure_whole_genome_reference(None, cache_dir)
 
 
 def ensure_whole_genome_reference(reference: str | None, cache_dir: str) -> str:
@@ -346,6 +309,142 @@ def read_fasta(path: str) -> dict[str, str]:
         sequences[name] = "".join(parts)
 
     return sequences
+
+
+# ─── BWA-based exact matching ─────────────────────────────────────────────────
+
+
+def ensure_bwa_index(ref_path: str) -> None:
+    """Build a BWA index for *ref_path* unless one already exists.
+
+    The index files (*.bwt, *.pac, *.amb, *.ann, *.sa) are stored next to the
+    reference file.  The *.bwt file is used as a sentinel: if it is present we
+    assume the full index is intact and skip re-indexing.  If BWA finds any
+    other index files missing it will report a clear error at search time.
+    """
+    bwt = ref_path + ".bwt"
+    if Path(bwt).exists():
+        print(f"[kmer_hunter] BWA index already exists: {bwt}", file=sys.stderr)
+        return
+    print(f"[kmer_hunter] Building BWA index: {ref_path} …", file=sys.stderr)
+    result = subprocess.run(
+        ["bwa", "index", ref_path], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        sys.exit(f"[kmer_hunter] ERROR: bwa index failed:\n{result.stderr}")
+    print("[kmer_hunter] BWA index ready.", file=sys.stderr)
+
+
+def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
+    """Return only exact, full-length alignments from SAM output.
+
+    An alignment is accepted when:
+    - The read is mapped (FLAG & 4 == 0).
+    - It is not a supplementary alignment (FLAG & 2048 == 0).
+    - The CIGAR string is exactly ``{kmer_len}M`` (no soft clips, no gaps).
+    - The ``NM`` tag equals 0 (zero mismatches / indels).
+    """
+    hits: list[dict] = []
+    for line in sam_text.splitlines():
+        if line.startswith("@"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 11:
+            continue
+        qname = fields[0]
+        flag = int(fields[1])
+        chrom = fields[2]
+        pos = int(fields[3])  # 1-based in SAM
+        cigar = fields[5]
+
+        if flag & 4:     # unmapped
+            continue
+        if flag & 2048:  # supplementary (split alignment)
+            continue
+
+        kmer_seq = kmer_seqs.get(qname, "")
+        kmer_len = len(kmer_seq)
+
+        # Require a pure full-length match — no soft clips, no indels
+        if cigar != f"{kmer_len}M":
+            continue
+
+        nm = next(
+            (int(f[5:]) for f in fields[11:] if f.startswith("NM:i:")), None
+        )
+        if nm != 0:
+            continue
+
+        strand = "-" if (flag & 16) else "+"
+        start = pos
+        end = pos + kmer_len - 1
+        hits.append(
+            {
+                "kmer": qname,
+                "seq": kmer_seq,
+                "chrom": chrom,
+                "start": start,
+                "end": end,
+                "strand": strand,
+                "region": annotate_region(chrom, start),
+            }
+        )
+    return hits
+
+
+def bwa_find_exact_matches(
+    kmers: list[tuple[str, str]],
+    ref_path: str,
+) -> list[dict]:
+    """Find all exact k-mer matches using BWA mem.
+
+    This is orders of magnitude faster than Python string search for large
+    k-mer sets.  BWA mem is invoked once for the entire k-mer collection with
+    settings that strongly penalise mismatches, gaps, and soft-clipping so
+    that only perfect full-length alignments score above the reporting
+    threshold.  The SAM output is then filtered through ``_parse_sam_exact``
+    for additional correctness.
+
+    The BWA index is built automatically (see :func:`ensure_bwa_index`) unless
+    it already exists alongside *ref_path*.
+    """
+    ensure_bwa_index(ref_path)
+    kmer_seqs: dict[str, str] = dict(kmers)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
+        query_fa = fh.name
+        for name, seq in kmers:
+            fh.write(f">{name}\n{seq}\n")
+
+    try:
+        print(
+            f"[kmer_hunter] Running bwa mem on {len(kmers)} k-mer(s) …",
+            file=sys.stderr,
+        )
+        result = subprocess.run(
+            [
+                "bwa", "mem",
+                "-a",          # report all alignments, not just the best
+                "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
+                "-A", "1",     # match score
+                "-B", "1000",  # mismatch penalty (effectively blocks mismatches)
+                "-O", "1000,1000",  # gap-open penalty
+                "-E", "1000,1000",  # gap-extend penalty
+                "-L", "100,100",    # clip penalty (discourages soft-clipping)
+                "-T", "0",     # min score threshold; we filter by CIGAR + NM
+                ref_path,
+                query_fa,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            sys.exit(f"[kmer_hunter] ERROR: bwa mem failed:\n{result.stderr}")
+        hits = _parse_sam_exact(result.stdout, kmer_seqs)
+        print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
+        return hits
+    finally:
+        os.unlink(query_fa)
 
 
 # ─── Exact matching ───────────────────────────────────────────────────────────
@@ -966,77 +1065,36 @@ def main() -> None:
     kmers = read_kmers(args.kmers)
     print(f"[kmer_hunter] {len(kmers)} k-mer(s) loaded", file=sys.stderr)
 
-    # 2. Ensure reference genome (chrY-only by default)
+    # 2. Ensure reference genome (whole T2T genome by default)
     ref_path = ensure_reference(args.reference, args.cache_dir)
+    print(f"[kmer_hunter] Reference: {ref_path}", file=sys.stderr)
 
-    # 3. Load reference into memory
-    print(f"[kmer_hunter] Loading reference: {ref_path}", file=sys.stderr)
-    ref_seqs = read_fasta(ref_path)
-    chroms = ", ".join(ref_seqs)
-    print(f"[kmer_hunter] Chromosomes loaded: {chroms}", file=sys.stderr)
+    # 3. Search using BWA mem (exact matches, all chromosomes in one pass)
+    print("[kmer_hunter] Searching for exact matches via BWA …", file=sys.stderr)
+    hits = bwa_find_exact_matches(kmers, ref_path)
 
-    # 4. Exact matching on chrY reference
-    print("[kmer_hunter] Searching for exact matches …", file=sys.stderr)
-    hits = find_exact_matches(kmers, ref_seqs)
-    print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
-
-    chry_hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
+    all_hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
     )
 
-    # 5. Whole-genome non-chrY search (optional)
-    non_chry_bar: go.Figure | None = None
-    non_chry_table: go.Figure | None = None
-    non_chry_df = pd.DataFrame(
+    # 4. Split hits for chrY-specific and non-chrY visualisations
+    _empty = pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
     )
+    non_chry_df = (
+        all_hits_df[all_hits_df["chrom"] != "chrY"].copy()
+        if not all_hits_df.empty
+        else _empty
+    )
+    non_chry_bar = build_non_chry_bar(non_chry_df)
+    non_chry_table = build_non_chry_table(non_chry_df)
 
-    if args.whole_genome:
-        wg_ref_path = ensure_whole_genome_reference(
-            args.whole_genome_reference, args.cache_dir
-        )
-        print(
-            f"[kmer_hunter] Loading whole-genome reference: {wg_ref_path}",
-            file=sys.stderr,
-        )
-        wg_seqs = read_fasta(wg_ref_path)
-        non_chry_seqs = {k: v for k, v in wg_seqs.items() if k != "chrY"}
-        wg_chroms = ", ".join(wg_seqs)
-        print(
-            f"[kmer_hunter] Whole-genome chromosomes loaded: {wg_chroms}",
-            file=sys.stderr,
-        )
-
-        if non_chry_seqs:
-            print(
-                "[kmer_hunter] Searching non-chrY chromosomes for exact matches …",
-                file=sys.stderr,
-            )
-            non_chry_hits = find_exact_matches(kmers, non_chry_seqs)
-            print(
-                f"[kmer_hunter] {len(non_chry_hits)} non-chrY exact hit(s) found",
-                file=sys.stderr,
-            )
-            if non_chry_hits:
-                non_chry_df = pd.DataFrame(non_chry_hits)
-        else:
-            print(
-                "[kmer_hunter] No non-chrY chromosomes found in whole-genome reference.",
-                file=sys.stderr,
-            )
-
-        non_chry_bar = build_non_chry_bar(non_chry_df)
-        non_chry_table = build_non_chry_table(non_chry_df)
-
-    # Combine chrY hits with any non-chrY hits for the full report
-    all_hits_df = pd.concat([chry_hits_df, non_chry_df], ignore_index=True)
-
-    # 6. Build figures
+    # 5. Build figures
     karyogram = build_karyogram(all_hits_df)
     region_bar = build_region_bar(all_hits_df)
     hit_table = build_hit_table(all_hits_df)
 
-    # 7. Generate HTML report
+    # 6. Generate HTML report
     generate_html(
         karyogram,
         region_bar,

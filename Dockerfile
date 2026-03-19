@@ -10,9 +10,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 # ── Runtime image ────────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
-# Install only runtime system libraries (curl for optional reference download)
+# Install only runtime system libraries (bwa for fast exact-match search; curl for optional reference download)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends bwa ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
