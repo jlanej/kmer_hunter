@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
+import pandas as pd
+
 # kmer_hunter.py lives next to this test file.
 sys.path.insert(0, str(Path(__file__).parent))
 import kmer_hunter as kh
@@ -513,7 +515,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         kmers = [("k1", "ACGTACGTAC")]
 
         with patch("subprocess.run", side_effect=side_effects):
-            hits = kh.bwa_find_exact_matches(kmers, str(ref))
+            hits, _sam = kh.bwa_find_exact_matches(kmers, str(ref))
 
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["kmer"], "k1")
@@ -530,7 +532,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         mock_mem.stdout = sam
 
         with patch("subprocess.run", return_value=mock_mem) as mock_run:
-            hits = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
+            hits, _sam = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
 
         # Only bwa mem should have been called (index step was skipped)
         self.assertEqual(mock_run.call_count, 1)
@@ -560,7 +562,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         mock_mem.stdout = "@HD\tVN:1.6\n"
 
         with patch("subprocess.run", return_value=mock_mem):
-            hits = kh.bwa_find_exact_matches([], str(ref))
+            hits, _sam = kh.bwa_find_exact_matches([], str(ref))
 
         self.assertEqual(hits, [])
 
@@ -741,7 +743,7 @@ class TestPolyAKmerIntegration(unittest.TestCase):
             mock_mem.stdout = sam_output
 
             with patch("subprocess.run", return_value=mock_mem):
-                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+                hits, _sam = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
 
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["kmer"], "kmer_1")
@@ -770,7 +772,7 @@ class TestPolyAKmerIntegration(unittest.TestCase):
             mock_mem.stdout = sam_output
 
             with patch("subprocess.run", return_value=mock_mem):
-                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+                hits, _sam = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
 
         self.assertEqual(hits, [])
 
@@ -841,7 +843,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         prefix_len = len(_SEP)  # kmer embedded right after the separator
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
 
         fwd = [h for h in hits if h["strand"] == "+" and h["kmer"] == "k1"]
         self.assertGreater(len(fwd), 0, "BWA should find the unique k-mer")
@@ -854,7 +856,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         # Reference contains only GC repeats — no match possible.
         ref_path = self._ref_without()
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
         self.assertEqual(hits, [])
 
     # ── poly-A k-mer tests ────────────────────────────────────────────────────
@@ -869,7 +871,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = _POLY_A_KMER_SEQS[0]
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
         kmer_hits = [h for h in hits if h["kmer"] == "kmer_1" and h["strand"] == "+"]
         self.assertGreater(
             len(kmer_hits), 0,
@@ -881,7 +883,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = _POLY_A_KMER_SEQS[0]
         ref_path = self._ref_without()
 
-        hits = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
         self.assertEqual(hits, [])
 
     def test_all_26_poly_a_kmers_found_via_real_bwa(self):
@@ -895,7 +897,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_containing(_POLY_A_KMER_SEQS)
         kmers = [(f"kmer_{i + 1}", seq) for i, seq in enumerate(_POLY_A_KMER_SEQS)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         found_names = {h["kmer"] for h in hits}
 
         for name, seq in kmers:
@@ -910,7 +912,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_without()
         kmers = [(f"kmer_{i + 1}", seq) for i, seq in enumerate(_POLY_A_KMER_SEQS)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         self.assertEqual(hits, [], f"Expected no hits but got {len(hits)}")
 
     def test_hit_dict_keys_from_real_bwa(self):
@@ -918,7 +920,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = "ACGTCAGTGACGATCGTAGCTAGCATGCATGC"
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
         self.assertTrue(hits, "Expected at least one hit from real BWA")
         expected_keys = {"kmer", "seq", "chrom", "start", "end", "strand", "region"}
         for hit in hits:
@@ -933,10 +935,240 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_containing(kmers_seqs)
         kmers = [(f"k{i + 1}", seq) for i, seq in enumerate(kmers_seqs)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         found = {h["kmer"] for h in hits}
         self.assertIn("k1", found)
         self.assertIn("k2", found)
+
+
+# ── collapse_to_intervals ─────────────────────────────────────────────────────
+
+class TestCollapseToIntervals(unittest.TestCase):
+    def test_empty_dataframe_returns_empty(self):
+        df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
+        result = kh.collapse_to_intervals(df)
+        self.assertEqual(len(result), 0)
+        self.assertIn("chrom", result.columns)
+        self.assertIn("count", result.columns)
+
+    def test_single_hit_produces_single_interval(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=1000)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["start"], 100)
+        self.assertEqual(result.iloc[0]["end"], 110)
+        self.assertEqual(result.iloc[0]["count"], 1)
+
+    def test_nearby_hits_merged(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chrY", "start": 500, "end": 510, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=1000)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["count"], 2)
+        self.assertEqual(result.iloc[0]["start"], 100)
+        self.assertEqual(result.iloc[0]["end"], 510)
+
+    def test_distant_hits_separate(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chrY", "start": 5000, "end": 5010, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=500)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result.iloc[0]["count"], 1)
+        self.assertEqual(result.iloc[1]["count"], 1)
+
+    def test_different_chromosomes_not_merged(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chr1", "start": 100, "end": 110, "strand": "+", "region": "chr1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=1000)
+        self.assertEqual(len(result), 2)
+
+    def test_result_columns(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df)
+        expected = {"chrom", "start", "end", "count", "region"}
+        self.assertEqual(set(result.columns), expected)
+
+    def test_end_position_uses_max(self):
+        """When merging, the end position should be the maximum end of all merged hits."""
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 200, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chrY", "start": 150, "end": 180, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=100)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["end"], 200)
+
+
+# ── detect_clusters ───────────────────────────────────────────────────────────
+
+class TestDetectClusters(unittest.TestCase):
+    def test_empty_dataframe(self):
+        df = pd.DataFrame(columns=["chrom", "start", "end", "count", "region"])
+        result = kh.detect_clusters(df)
+        self.assertIn("cluster", result.columns)
+
+    def test_cluster_detection(self):
+        df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 500, "count": 10, "region": "PAR1"},
+            {"chrom": "chrY", "start": 1000, "end": 1500, "count": 2, "region": "PAR1"},
+        ])
+        result = kh.detect_clusters(df, min_hits=5)
+        self.assertTrue(result.iloc[0]["cluster"])
+        self.assertFalse(result.iloc[1]["cluster"])
+
+    def test_default_threshold(self):
+        df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 500, "count": 5, "region": "PAR1"},
+            {"chrom": "chrY", "start": 1000, "end": 1500, "count": 4, "region": "PAR1"},
+        ])
+        result = kh.detect_clusters(df)
+        self.assertTrue(result.iloc[0]["cluster"])
+        self.assertFalse(result.iloc[1]["cluster"])
+
+    def test_original_not_modified(self):
+        df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 500, "count": 10, "region": "PAR1"},
+        ])
+        result = kh.detect_clusters(df)
+        self.assertNotIn("cluster", df.columns)
+        self.assertIn("cluster", result.columns)
+
+
+# ── build_non_chry_summary ────────────────────────────────────────────────────
+
+class TestBuildNonChrySummary(unittest.TestCase):
+    def test_empty_dataframe(self):
+        df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
+        fig = kh.build_non_chry_summary(df)
+        self.assertIsNotNone(fig)
+
+    def test_summary_groups_by_chrom(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1", "start": 100, "end": 110, "strand": "+", "region": "chr1"},
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1", "start": 200, "end": 210, "strand": "+", "region": "chr1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chr2", "start": 100, "end": 110, "strand": "+", "region": "chr2"},
+        ])
+        fig = kh.build_non_chry_summary(df)
+        # Table should have data for 2 chromosomes
+        table_data = fig.data[0]
+        self.assertEqual(len(table_data.cells.values[0]), 2)
+
+    def test_chry_excluded(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chr1", "start": 100, "end": 110, "strand": "+", "region": "chr1"},
+        ])
+        fig = kh.build_non_chry_summary(df)
+        table_data = fig.data[0]
+        chroms = list(table_data.cells.values[0])
+        self.assertNotIn("chrY", chroms)
+        self.assertIn("chr1", chroms)
+
+
+# ── save_alignment_file ───────────────────────────────────────────────────────
+
+class TestSaveAlignmentFile(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_writes_sam_file(self):
+        sam_text = "@HD\tVN:1.6\nk1\t0\tchrY\t100\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        out = self.tmpdir / "output.sam"
+        result = kh.save_alignment_file(sam_text, str(out))
+        self.assertTrue(Path(result).exists())
+        content = Path(result).read_text()
+        self.assertIn("@HD", content)
+        self.assertIn("k1", content)
+
+    def test_auto_appends_sam_extension(self):
+        sam_text = "@HD\tVN:1.6\n"
+        out = self.tmpdir / "output"
+        result = kh.save_alignment_file(sam_text, str(out))
+        self.assertTrue(result.endswith(".sam"))
+
+    def test_bam_falls_back_to_sam_without_samtools(self):
+        sam_text = "@HD\tVN:1.6\n"
+        out = self.tmpdir / "output.bam"
+        with patch("shutil.which", return_value=None):
+            result = kh.save_alignment_file(sam_text, str(out))
+        # Without samtools, should fall back to SAM
+        self.assertTrue(result.endswith(".sam"))
+        self.assertTrue(Path(result).exists())
+
+
+# ── build_karyogram with intervals ────────────────────────────────────────────
+
+class TestBuildKaryogramWithIntervals(unittest.TestCase):
+    def test_karyogram_with_intervals(self):
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        self.assertIsNotNone(fig)
+
+    def test_karyogram_with_clusters(self):
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 1000, "count": 10, "region": "PAR1", "cluster": True},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        self.assertIsNotNone(fig)
+
+    def test_karyogram_without_intervals_fallback(self):
+        """When no intervals are provided, the old-style individual markers are shown."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=None)
+        self.assertIsNotNone(fig)
+
+    def test_karyogram_empty(self):
+        hits_df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
+        fig = kh.build_karyogram(hits_df, intervals_df=pd.DataFrame())
+        self.assertIsNotNone(fig)
+
+
+# ── bwa_find_exact_matches returns sam_text ───────────────────────────────────
+
+class TestBwaReturnsSamText(unittest.TestCase):
+    def test_returns_tuple(self):
+        ref = Path(tempfile.mkdtemp()) / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")
+
+        sam = "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        mock_mem = MagicMock()
+        mock_mem.returncode = 0
+        mock_mem.stdout = sam
+
+        with patch("subprocess.run", return_value=mock_mem):
+            result = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        hits, sam_text = result
+        self.assertIsInstance(hits, list)
+        self.assertIsInstance(sam_text, str)
+        self.assertIn("k1", sam_text)
 
 
 if __name__ == "__main__":
