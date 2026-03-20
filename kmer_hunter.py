@@ -10,7 +10,9 @@ Both forward and reverse-complement strands are searched.
 import argparse
 import gzip
 import os
+import math
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -151,6 +153,17 @@ def parse_args() -> argparse.Namespace:
             "BWA index files (*.amb, *.ann, *.bwt, *.pac, *.sa) are "
             "expected alongside the FASTA and will be built automatically "
             "if absent."
+        ),
+    )
+    parser.add_argument(
+        "--output-bam",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write a BAM (or SAM) alignment file with all BWA hits. "
+            "If the path ends in .bam and samtools is available, a "
+            "coordinate-sorted BAM with index is produced; otherwise "
+            "a SAM file is written."
         ),
     )
     return parser.parse_args()
@@ -400,7 +413,8 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
 def bwa_find_exact_matches(
     kmers: list[tuple[str, str]],
     ref_path: str,
-) -> list[dict]:
+    sam_path: str | None = None,
+) -> tuple[list[dict], str]:
     """Find all exact k-mer matches using BWA mem.
 
     This is orders of magnitude faster than Python string search for large
@@ -412,6 +426,11 @@ def bwa_find_exact_matches(
 
     The BWA index is built automatically (see :func:`ensure_bwa_index`) unless
     it already exists alongside *ref_path*.
+
+    Returns ``(hits, sam_text)`` where *sam_text* is the raw SAM output from
+    BWA.  If *sam_path* is given, the filtered exact-match SAM is saved there
+    (or converted to BAM when samtools is available and the path ends in
+    ``.bam``).
     """
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
@@ -446,9 +465,14 @@ def bwa_find_exact_matches(
         )
         if result.returncode != 0:
             sys.exit(f"[kmer_hunter] ERROR: bwa mem failed:\n{result.stderr}")
-        hits = _parse_sam_exact(result.stdout, kmer_seqs)
+        sam_text = result.stdout
+        hits = _parse_sam_exact(sam_text, kmer_seqs)
         print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
-        return hits
+
+        if sam_path:
+            save_alignment_file(sam_text, sam_path)
+
+        return hits, sam_text
     finally:
         os.unlink(query_fa)
 
@@ -525,11 +549,192 @@ def find_exact_matches(
     return hits
 
 
+# ─── Interval collapsing & cluster detection ──────────────────────────────────
+
+
+def collapse_to_intervals(
+    hits_df: pd.DataFrame, gap: int = 1000
+) -> pd.DataFrame:
+    """Merge nearby hits on the same chromosome into intervals with counts.
+
+    Hits whose start positions are within *gap* bp of the previous hit's end
+    are merged into a single interval.  Returns a DataFrame with columns:
+    ``chrom``, ``start``, ``end``, ``count``, ``region``.
+    """
+    if hits_df.empty:
+        return pd.DataFrame(columns=["chrom", "start", "end", "count", "region"])
+
+    intervals: list[dict] = []
+    sorted_df = hits_df.sort_values(["chrom", "start"]).reset_index(drop=True)
+
+    for chrom, group in sorted_df.groupby("chrom", sort=False):
+        rows = group.to_dict("records")
+        cur = {
+            "chrom": chrom,
+            "start": rows[0]["start"],
+            "end": rows[0]["end"],
+            "count": 1,
+            "region": rows[0]["region"],
+        }
+        for row in rows[1:]:
+            if row["start"] <= cur["end"] + gap:
+                cur["end"] = max(cur["end"], row["end"])
+                cur["count"] += 1
+            else:
+                intervals.append(cur)
+                cur = {
+                    "chrom": chrom,
+                    "start": row["start"],
+                    "end": row["end"],
+                    "count": 1,
+                    "region": row["region"],
+                }
+        intervals.append(cur)
+
+    return pd.DataFrame(intervals)
+
+
+def detect_clusters(
+    intervals_df: pd.DataFrame, min_hits: int = 5
+) -> pd.DataFrame:
+    """Mark intervals as clusters when they contain at least *min_hits* hits.
+
+    Returns a copy of *intervals_df* with an added boolean ``cluster`` column.
+    """
+    if intervals_df.empty:
+        df = intervals_df.copy()
+        df["cluster"] = pd.Series(dtype=bool)
+        return df
+
+    df = intervals_df.copy()
+    df["cluster"] = df["count"] >= min_hits
+    return df
+
+
+def build_non_chry_summary(hits_df: pd.DataFrame) -> go.Figure:
+    """Summary table of non-chrY hits grouped by chromosome.
+
+    Shows chromosome, total hits, and number of distinct k-mers matched.
+    """
+    non_chry = (
+        hits_df[hits_df["chrom"] != "chrY"]
+        if not hits_df.empty
+        else pd.DataFrame(columns=["kmer", "chrom", "start", "end", "strand", "seq"])
+    )
+
+    if non_chry.empty:
+        display = pd.DataFrame(columns=["chrom", "total_hits", "distinct_kmers"])
+    else:
+        summary = non_chry.groupby("chrom").agg(
+            total_hits=("chrom", "size"),
+            distinct_kmers=("kmer", "nunique"),
+        ).reset_index()
+        display = summary.sort_values("chrom").reset_index(drop=True)
+
+    fig = go.Figure(
+        go.Table(
+            header=dict(
+                values=[f"<b>{c}</b>" for c in display.columns],
+                fill_color="#2c3e50",
+                font=dict(color="white", size=12),
+                align="left",
+                height=32,
+            ),
+            cells=dict(
+                values=[display[c] for c in display.columns],
+                fill_color=[["#f8f9fa"] * len(display) for _ in display.columns],
+                align="left",
+                font=dict(size=11),
+                height=28,
+            ),
+        )
+    )
+    fig.update_layout(
+        title="Non-chrY Exact Hit Summary by Chromosome",
+        height=max(220, 35 * len(display) + 70),
+        margin=dict(t=60, b=20),
+    )
+    return fig
+
+
+# ─── Alignment file output ────────────────────────────────────────────────────
+
+
+def save_alignment_file(sam_text: str, output_path: str) -> str:
+    """Write filtered SAM and optionally convert to sorted BAM.
+
+    If *samtools* is available the SAM is converted to a coordinate-sorted BAM
+    with index.  Otherwise the SAM is saved as-is.  Returns the path of the
+    file actually written.
+    """
+    sam_path = output_path
+    if not sam_path.endswith(".sam") and not sam_path.endswith(".bam"):
+        sam_path = output_path + ".sam"
+
+    has_samtools = shutil.which("samtools") is not None
+
+    if has_samtools and output_path.endswith(".bam"):
+        # SAM → sorted BAM
+        bam_path = output_path
+        unsorted = bam_path + ".unsorted.bam"
+        try:
+            # Convert SAM → unsorted BAM
+            p1 = subprocess.run(
+                ["samtools", "view", "-bS", "-"],
+                input=sam_text,
+                capture_output=True,
+                text=False,
+            )
+            if p1.returncode != 0:
+                raise RuntimeError(p1.stderr.decode())
+            Path(unsorted).write_bytes(p1.stdout)
+
+            # Sort
+            p2 = subprocess.run(
+                ["samtools", "sort", "-o", bam_path, unsorted],
+                capture_output=True,
+                text=True,
+            )
+            if p2.returncode != 0:
+                raise RuntimeError(p2.stderr)
+
+            # Index
+            subprocess.run(
+                ["samtools", "index", bam_path],
+                capture_output=True,
+                text=True,
+            )
+            return bam_path
+        except Exception as exc:
+            print(
+                f"[kmer_hunter] WARNING: BAM conversion failed ({exc}); "
+                f"falling back to SAM",
+                file=sys.stderr,
+            )
+            sam_path = output_path.replace(".bam", ".sam")
+        finally:
+            Path(unsorted).unlink(missing_ok=True)
+
+    # Fall back: write SAM
+    Path(sam_path).write_text(sam_text, encoding="utf-8")
+    print(f"[kmer_hunter] Alignment file written → {sam_path}", file=sys.stderr)
+    return sam_path
+
+
 # ─── Plotly figures ───────────────────────────────────────────────────────────
 
 
-def build_karyogram(hits_df: pd.DataFrame) -> go.Figure:
-    """Interactive chrY karyogram with PAR/XTR bands and hit markers."""
+def build_karyogram(
+    hits_df: pd.DataFrame,
+    intervals_df: pd.DataFrame | None = None,
+) -> go.Figure:
+    """Interactive chrY karyogram with PAR/XTR bands and hit density track.
+
+    When *intervals_df* is provided the karyogram displays a density track
+    showing collapsed intervals colour-coded by hit count.  Cluster intervals
+    (``cluster == True``) are outlined for emphasis.  When *intervals_df* is
+    ``None`` the original per-hit triangle markers are shown instead.
+    """
     fig = go.Figure()
 
     # Chromosome body (background bar)
@@ -582,14 +787,85 @@ def build_karyogram(hits_df: pd.DataFrame) -> go.Figure:
             )
         )
 
-    # k-mer hit markers
     chry_hits = (
         hits_df[hits_df["chrom"] == "chrY"]
         if not hits_df.empty
         else pd.DataFrame()
     )
 
-    if not chry_hits.empty:
+    # ── Density track using collapsed intervals ──────────────────────────
+    if intervals_df is not None and not intervals_df.empty:
+        chry_intervals = intervals_df[intervals_df["chrom"] == "chrY"]
+    else:
+        chry_intervals = pd.DataFrame()
+
+    if not chry_intervals.empty:
+        max_count = chry_intervals["count"].max()
+        for _, row in chry_intervals.iterrows():
+            # Colour intensity based on log-scaled hit count
+            intensity = math.log1p(row["count"]) / math.log1p(max_count)
+            opacity = 0.35 + 0.60 * intensity
+            is_cluster = bool(row.get("cluster", False))
+            line_cfg = (
+                dict(color="#c0392b", width=2)
+                if is_cluster
+                else dict(width=0)
+            )
+            fig.add_shape(
+                type="rect",
+                x0=row["start"],
+                x1=row["end"],
+                y0=-1.10,
+                y1=-0.50,
+                fillcolor="#e74c3c",
+                opacity=opacity,
+                line=line_cfg,
+            )
+
+        # Hover trace for interval details
+        midpoints = (chry_intervals["start"] + chry_intervals["end"]) / 2
+        hover_texts = [
+            (
+                f"<b>Interval</b><br>"
+                f"chrY:{row['start']:,}–{row['end']:,}<br>"
+                f"Hits: {row['count']}<br>"
+                f"Region: {row['region']}<br>"
+                f"{'🔴 <b>Cluster</b>' if row.get('cluster', False) else ''}"
+            )
+            for _, row in chry_intervals.iterrows()
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=midpoints.tolist(),
+                y=[-0.80] * len(chry_intervals),
+                mode="markers",
+                marker=dict(size=1, color="rgba(0,0,0,0)"),
+                text=hover_texts,
+                hovertemplate="%{text}<extra></extra>",
+                name="hit interval",
+                showlegend=True,
+            )
+        )
+
+        # Legend entry for clusters
+        if chry_intervals.get("cluster", pd.Series(dtype=bool)).any():
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="markers",
+                    marker=dict(
+                        size=13, color="#c0392b", symbol="square",
+                        line=dict(color="#c0392b", width=2),
+                    ),
+                    name="cluster (dense)",
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+
+    elif not chry_hits.empty:
+        # Fallback: individual markers for small datasets
         midpoints = (chry_hits["start"] + chry_hits["end"]) / 2
         hover_texts = [
             (
@@ -831,6 +1107,9 @@ def generate_html(
     output_path: str,
     non_chry_bar: go.Figure | None = None,
     non_chry_table: go.Figure | None = None,
+    non_chry_summary: go.Figure | None = None,
+    intervals_df: pd.DataFrame | None = None,
+    alignment_path: str | None = None,
 ) -> None:
     """Combine figures into a single self-contained HTML report."""
     total_kmers = len(all_kmers)
@@ -845,6 +1124,14 @@ def generate_html(
     par1_hits = int((chry_hits["region"] == "PAR1").sum()) if not chry_hits.empty else 0
     xtr_hits = int((chry_hits["region"] == "XTR").sum()) if not chry_hits.empty else 0
     par2_hits = int((chry_hits["region"] == "PAR2").sum()) if not chry_hits.empty else 0
+
+    # Interval / cluster stats
+    interval_count = len(intervals_df) if intervals_df is not None and not intervals_df.empty else 0
+    cluster_count = (
+        int(intervals_df["cluster"].sum())
+        if intervals_df is not None and "cluster" in intervals_df.columns and not intervals_df.empty
+        else 0
+    )
 
     whole_genome_mode = non_chry_bar is not None and non_chry_table is not None
     non_chry_hit_count = (
@@ -879,7 +1166,32 @@ def generate_html(
         <div class="value">{chry_hit_count}</div>
         <div class="label">chrY Hits</div>
       </div>"""
-        non_chry_section = f"""
+
+        # Prefer the compact summary table when available
+        if non_chry_summary is not None:
+            non_chry_summary_html = to_html(
+                non_chry_summary, full_html=False, include_plotlyjs=False
+            )
+            non_chry_section = f"""
+    <!-- Non-chrY hits (whole-genome mode) -->
+    <div class="card">
+      <h2>Non-chrY Hits by Chromosome</h2>
+      {non_chry_bar_html}
+    </div>
+
+    <!-- Non-chrY summary table -->
+    <div class="card">
+      <h2>Non-chrY Summary</h2>
+      {non_chry_summary_html}
+    </div>
+
+    <!-- Non-chrY hit table -->
+    <div class="card">
+      <h2>Non-chrY Exact Hit Details</h2>
+      {non_chry_table_html}
+    </div>"""
+        else:
+            non_chry_section = f"""
     <!-- Non-chrY hits (whole-genome mode) -->
     <div class="card">
       <h2>Non-chrY Hits by Chromosome</h2>
@@ -897,6 +1209,28 @@ def generate_html(
         chry_stat_card = ""
         non_chry_section = ""
         genome_subtitle = "T2T CHM13v2.0 chrY — Exact k-mer Mapping Report"
+
+    # Interval / cluster stat cards
+    interval_stat_card = f"""
+      <div class="stat-card">
+        <div class="value">{interval_count}</div>
+        <div class="label">Intervals</div>
+      </div>""" if interval_count > 0 else ""
+
+    cluster_stat_card = f"""
+      <div class="stat-card nonchrY">
+        <div class="value">{cluster_count}</div>
+        <div class="label">Clusters</div>
+      </div>""" if cluster_count > 0 else ""
+
+    # Alignment file note
+    alignment_note = ""
+    if alignment_path:
+        alignment_note = f"""
+    <div class="card">
+      <h2>Alignment File</h2>
+      <p>BWA alignment output saved to: <code>{alignment_path}</code></p>
+    </div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1010,7 +1344,7 @@ def generate_html(
       <div class="stat-card miss">
         <div class="value">{kmers_no_hits}</div>
         <div class="label">k-mers Not Found</div>
-      </div>{chry_stat_card}{non_chry_stat_card}
+      </div>{chry_stat_card}{non_chry_stat_card}{interval_stat_card}{cluster_stat_card}
       <div class="stat-card par1">
         <div class="value">{par1_hits}</div>
         <div class="label">PAR1 Hits</div>
@@ -1044,6 +1378,7 @@ def generate_html(
       {hit_table_html}
     </div>
 {non_chry_section}
+{alignment_note}
   </div>
 
   <footer>
@@ -1077,13 +1412,18 @@ def main() -> None:
 
     # 3. Search using BWA mem (exact matches, all chromosomes in one pass)
     print("[kmer_hunter] Searching for exact matches via BWA …", file=sys.stderr)
-    hits = bwa_find_exact_matches(kmers, ref_path)
+    sam_path = getattr(args, "output_bam", None)
+    hits, _sam_text = bwa_find_exact_matches(kmers, ref_path, sam_path=sam_path)
 
     all_hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
     )
 
-    # 4. Split hits for chrY-specific and non-chrY visualisations
+    # 4. Collapse to intervals and detect clusters
+    intervals_df = collapse_to_intervals(all_hits_df)
+    intervals_df = detect_clusters(intervals_df)
+
+    # 5. Split hits for chrY-specific and non-chrY visualisations
     _empty = pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
     )
@@ -1094,13 +1434,14 @@ def main() -> None:
     )
     non_chry_bar = build_non_chry_bar(non_chry_df)
     non_chry_table = build_non_chry_table(non_chry_df)
+    non_chry_summary = build_non_chry_summary(all_hits_df)
 
-    # 5. Build figures
-    karyogram = build_karyogram(all_hits_df)
+    # 6. Build figures (pass intervals for density track)
+    karyogram = build_karyogram(all_hits_df, intervals_df=intervals_df)
     region_bar = build_region_bar(all_hits_df)
     hit_table = build_hit_table(all_hits_df)
 
-    # 6. Generate HTML report
+    # 7. Generate HTML report
     generate_html(
         karyogram,
         region_bar,
@@ -1110,6 +1451,9 @@ def main() -> None:
         args.output,
         non_chry_bar=non_chry_bar,
         non_chry_table=non_chry_table,
+        non_chry_summary=non_chry_summary,
+        intervals_df=intervals_df,
+        alignment_path=sam_path,
     )
     print("[kmer_hunter] Done!", file=sys.stderr)
 

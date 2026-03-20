@@ -513,7 +513,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         kmers = [("k1", "ACGTACGTAC")]
 
         with patch("subprocess.run", side_effect=side_effects):
-            hits = kh.bwa_find_exact_matches(kmers, str(ref))
+            hits, _sam = kh.bwa_find_exact_matches(kmers, str(ref))
 
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["kmer"], "k1")
@@ -530,7 +530,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         mock_mem.stdout = sam
 
         with patch("subprocess.run", return_value=mock_mem) as mock_run:
-            hits = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
+            hits, _sam = kh.bwa_find_exact_matches([("k1", "ACGTACGTAC")], str(ref))
 
         # Only bwa mem should have been called (index step was skipped)
         self.assertEqual(mock_run.call_count, 1)
@@ -560,7 +560,7 @@ class TestBwaFindExactMatches(unittest.TestCase):
         mock_mem.stdout = "@HD\tVN:1.6\n"
 
         with patch("subprocess.run", return_value=mock_mem):
-            hits = kh.bwa_find_exact_matches([], str(ref))
+            hits, _sam = kh.bwa_find_exact_matches([], str(ref))
 
         self.assertEqual(hits, [])
 
@@ -741,7 +741,7 @@ class TestPolyAKmerIntegration(unittest.TestCase):
             mock_mem.stdout = sam_output
 
             with patch("subprocess.run", return_value=mock_mem):
-                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+                hits, _sam = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
 
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["kmer"], "kmer_1")
@@ -770,7 +770,7 @@ class TestPolyAKmerIntegration(unittest.TestCase):
             mock_mem.stdout = sam_output
 
             with patch("subprocess.run", return_value=mock_mem):
-                hits = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
+                hits, _sam = kh.bwa_find_exact_matches([("kmer_1", target)], str(ref))
 
         self.assertEqual(hits, [])
 
@@ -841,7 +841,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         prefix_len = len(_SEP)  # kmer embedded right after the separator
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
 
         fwd = [h for h in hits if h["strand"] == "+" and h["kmer"] == "k1"]
         self.assertGreater(len(fwd), 0, "BWA should find the unique k-mer")
@@ -854,7 +854,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         # Reference contains only GC repeats — no match possible.
         ref_path = self._ref_without()
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
         self.assertEqual(hits, [])
 
     # ── poly-A k-mer tests ────────────────────────────────────────────────────
@@ -869,7 +869,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = _POLY_A_KMER_SEQS[0]
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
         kmer_hits = [h for h in hits if h["kmer"] == "kmer_1" and h["strand"] == "+"]
         self.assertGreater(
             len(kmer_hits), 0,
@@ -881,7 +881,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = _POLY_A_KMER_SEQS[0]
         ref_path = self._ref_without()
 
-        hits = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("kmer_1", kmer)], ref_path)
         self.assertEqual(hits, [])
 
     def test_all_26_poly_a_kmers_found_via_real_bwa(self):
@@ -895,7 +895,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_containing(_POLY_A_KMER_SEQS)
         kmers = [(f"kmer_{i + 1}", seq) for i, seq in enumerate(_POLY_A_KMER_SEQS)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         found_names = {h["kmer"] for h in hits}
 
         for name, seq in kmers:
@@ -910,7 +910,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_without()
         kmers = [(f"kmer_{i + 1}", seq) for i, seq in enumerate(_POLY_A_KMER_SEQS)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         self.assertEqual(hits, [], f"Expected no hits but got {len(hits)}")
 
     def test_hit_dict_keys_from_real_bwa(self):
@@ -918,7 +918,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         kmer = "ACGTCAGTGACGATCGTAGCTAGCATGCATGC"
         ref_path = self._ref_containing([kmer])
 
-        hits = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
+        hits, _sam = kh.bwa_find_exact_matches([("k1", kmer)], ref_path)
         self.assertTrue(hits, "Expected at least one hit from real BWA")
         expected_keys = {"kmer", "seq", "chrom", "start", "end", "strand", "region"}
         for hit in hits:
@@ -933,7 +933,7 @@ class TestBwaRealIntegration(unittest.TestCase):
         ref_path = self._ref_containing(kmers_seqs)
         kmers = [(f"k{i + 1}", seq) for i, seq in enumerate(kmers_seqs)]
 
-        hits = kh.bwa_find_exact_matches(kmers, ref_path)
+        hits, _sam = kh.bwa_find_exact_matches(kmers, ref_path)
         found = {h["kmer"] for h in hits}
         self.assertIn("k1", found)
         self.assertIn("k2", found)
