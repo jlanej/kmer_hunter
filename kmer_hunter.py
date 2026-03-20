@@ -673,6 +673,9 @@ def save_alignment_file(sam_text: str, output_path: str) -> str:
 
     has_samtools = shutil.which("samtools") is not None
 
+    if not has_samtools and sam_path.endswith(".bam"):
+        sam_path = sam_path[:-4] + ".sam"
+
     if has_samtools and output_path.endswith(".bam"):
         # SAM → sorted BAM
         bam_path = output_path

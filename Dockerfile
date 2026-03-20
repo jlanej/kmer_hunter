@@ -12,7 +12,7 @@ FROM python:3.11-slim
 
 # Install only runtime system libraries (bwa for fast exact-match search; curl for optional reference download)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bwa ca-certificates curl \
+ && apt-get install -y --no-install-recommends bwa ca-certificates curl samtools \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
