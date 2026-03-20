@@ -159,10 +159,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "Write a BAM (or SAM) alignment file with all BWA hits. "
-            "If the path ends in .bam and samtools is available, a "
-            "coordinate-sorted BAM with index is produced; otherwise "
-            "a SAM file is written."
+            "Override the default alignment output path. "
+            "By default a coordinate-sorted, indexed BAM is written to "
+            "<output_stem>.bam when samtools is available, or a plain SAM "
+            "otherwise. Use this flag to specify a custom path; if the path "
+            "ends in .bam and samtools is present a sorted BAM with index is "
+            "produced, otherwise a SAM file is written."
         ),
     )
     return parser.parse_args()
@@ -446,14 +448,14 @@ def bwa_find_exact_matches(
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
 
+    if not kmers:
+        return [], ""
+
     n = len(kmers)
     print(
         f"[kmer_hunter] Running bwa mem on {n} k-mer(s) …",
         file=sys.stderr,
     )
-
-    if not kmers:
-        return [], ""
 
     n_batches = (n + batch_size - 1) // batch_size
     all_hits: list[dict] = []
@@ -749,9 +751,13 @@ def build_non_chry_summary(hits_df: pd.DataFrame) -> go.Figure:
 def save_alignment_file(sam_text: str, output_path: str) -> str:
     """Write filtered SAM and optionally convert to sorted BAM.
 
-    If *samtools* is available the SAM is converted to a coordinate-sorted BAM
-    with index.  Otherwise the SAM is saved as-is.  Returns the path of the
-    file actually written.
+    When *output_path* ends in ``.bam`` and *samtools* is available the SAM is
+    converted to a coordinate-sorted, indexed BAM.  Otherwise the SAM is saved
+    as-is (with a ``.sam`` extension appended if no recognised extension is
+    present).  Returns the path of the file actually written.
+
+    By default kmer_hunter writes a sorted BAM to ``<output_stem>.bam``.  Use
+    ``--output-bam`` to override the destination path.
     """
     sam_path = output_path
     if not sam_path.endswith(".sam") and not sam_path.endswith(".bam"):
@@ -1795,9 +1801,10 @@ def main() -> None:
     output_stem = str(Path(args.output).with_suffix(""))
 
     # 5a. Always save the alignment file; honour --output-bam if given,
-    #     otherwise default to <output_stem>.sam so the SAM is never lost.
+    #     otherwise default to <output_stem>.bam (sorted, indexed BAM when
+    #     samtools is available; plain SAM otherwise).
     requested_alignment_path = getattr(args, "output_bam", None)
-    alignment_dest = requested_alignment_path or f"{output_stem}.sam"
+    alignment_dest = requested_alignment_path or f"{output_stem}.bam"
     actual_alignment_path = save_alignment_file(sam_text, alignment_dest)
 
     # 5b. Write text report for kmers with more than one match

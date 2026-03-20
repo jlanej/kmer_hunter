@@ -1273,6 +1273,25 @@ class TestSaveAlignmentFile(unittest.TestCase):
         self.assertTrue(result.endswith(".sam"))
         self.assertTrue(Path(result).exists())
 
+    def test_bam_with_samtools_produces_sorted_bam(self):
+        """When samtools is available and path ends in .bam, a sorted BAM is written."""
+        sam_text = "@HD\tVN:1.6\nk1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        out = self.tmpdir / "output.bam"
+
+        # Simulate the three samtools calls: view (SAM→BAM), sort, index
+        mock_view = MagicMock(returncode=0, stdout=b"FAKE_BAM_BYTES")
+        mock_sort = MagicMock(returncode=0)
+        mock_index = MagicMock(returncode=0)
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/samtools"),
+            patch("subprocess.run", side_effect=[mock_view, mock_sort, mock_index]),
+        ):
+            result = kh.save_alignment_file(sam_text, str(out))
+
+        self.assertEqual(result, str(out))
+        self.assertTrue(result.endswith(".bam"))
+
 
 # ── build_karyogram with intervals ────────────────────────────────────────────
 
