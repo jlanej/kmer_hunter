@@ -332,12 +332,6 @@ def read_fasta(path: str) -> dict[str, str]:
 
 # ─── BWA-based exact matching ─────────────────────────────────────────────────
 
-# Maximum number of k-mers per bwa mem invocation.  Submitting millions of
-# sequences in a single call exhausts BWA's internal memory and triggers an
-# OOM kill (exit -9).  Batching keeps peak resident memory manageable.
-BWA_BATCH_SIZE = 50_000
-
-
 def ensure_bwa_index(ref_path: str) -> None:
     """Build a BWA index for *ref_path* unless one already exists.
 
@@ -422,28 +416,22 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
 def bwa_find_exact_matches(
     kmers: list[tuple[str, str]],
     ref_path: str,
-    batch_size: int = BWA_BATCH_SIZE,
 ) -> tuple[list[dict], str]:
     """Find all exact k-mer matches using BWA mem.
 
     This is orders of magnitude faster than Python string search for large
-    k-mer sets.  BWA mem is invoked with settings that strongly penalise
-    mismatches, gaps, and soft-clipping so that only perfect full-length
-    alignments score above the reporting threshold.  The SAM output is then
-    filtered through ``_parse_sam_exact`` for additional correctness.
-
-    Large k-mer sets are automatically split into batches of *batch_size*
-    k-mers.  Each batch is written to a temporary FASTA file and submitted to
-    a separate ``bwa mem`` invocation.  Results are merged before returning.
-    This prevents OOM kills when searching millions of k-mers at once.
+    k-mer sets.  BWA mem is invoked once for the entire k-mer collection with
+    settings that strongly penalise mismatches, gaps, and soft-clipping so
+    that only perfect full-length alignments score above the reporting
+    threshold.  The SAM output is then filtered through ``_parse_sam_exact``
+    for additional correctness.
 
     The BWA index is built automatically (see :func:`ensure_bwa_index`) unless
     it already exists alongside *ref_path*.
 
-    Returns ``(hits, sam_text)`` where *sam_text* is the concatenated raw SAM
-    output from all BWA batches (SAM headers kept from the first batch only).
-    Call :func:`save_alignment_file` separately if you need to persist the
-    alignments.
+    Returns ``(hits, sam_text)`` where *sam_text* is the raw SAM output from
+    BWA.  Call :func:`save_alignment_file` separately if you need to persist
+    the alignments.
     """
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
@@ -451,83 +439,53 @@ def bwa_find_exact_matches(
     if not kmers:
         return [], ""
 
-    n = len(kmers)
     print(
-        f"[kmer_hunter] Running bwa mem on {n} k-mer(s) …",
+        f"[kmer_hunter] Running bwa mem on {len(kmers)} k-mer(s) …",
         file=sys.stderr,
     )
 
-    n_batches = (n + batch_size - 1) // batch_size
-    all_hits: list[dict] = []
-    sam_parts: list[str] = []
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
+        query_fa = fh.name
+        for name, seq in kmers:
+            fh.write(f">{name}\n{seq}\n")
 
-    for batch_idx, batch_start in enumerate(range(0, n, batch_size), start=1):
-        batch = kmers[batch_start : batch_start + batch_size]
+    try:
+        result = subprocess.run(
+            [
+                "bwa", "mem",
+                "-a",          # report all alignments, not just the best
+                "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
+                # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
+                # Values like -B 1000 cause integer overflow inside BWA's
+                # internal scoring for repetitive k-mers (e.g. poly-A prefix),
+                # leading BWA to report wrong primary alignments and miss the
+                # actual exact matches.  Exact-match filtering is handled
+                # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
+                "-T", "0",     # min score threshold; we filter by CIGAR + NM
+                ref_path,
+                query_fa,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        os.unlink(query_fa)
 
-        if n_batches > 1:
-            print(
-                f"[kmer_hunter]   batch {batch_idx}/{n_batches}"
-                f" ({len(batch)} k-mer(s)) …",
-                file=sys.stderr,
-            )
+    if result.returncode != 0:
+        msg = (
+            f"[kmer_hunter] ERROR: bwa mem failed"
+            f" (exit {result.returncode}):\n"
+            f"stderr: {result.stderr}"
+        )
+        if result.stdout:
+            msg += f"\nstdout: {result.stdout}"
+        sys.exit(msg)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
-            query_fa = fh.name
-            for name, seq in batch:
-                fh.write(f">{name}\n{seq}\n")
+    sam_text = result.stdout
+    hits = _parse_sam_exact(sam_text, kmer_seqs)
+    print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
 
-        try:
-            result = subprocess.run(
-                [
-                    "bwa", "mem",
-                    "-a",          # report all alignments, not just the best
-                    "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
-                    # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
-                    # Values like -B 1000 cause integer overflow inside BWA's
-                    # internal scoring for repetitive k-mers (e.g. poly-A prefix),
-                    # leading BWA to report wrong primary alignments and miss the
-                    # actual exact matches.  Exact-match filtering is handled
-                    # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
-                    "-T", "0",     # min score threshold; we filter by CIGAR + NM
-                    ref_path,
-                    query_fa,
-                ],
-                capture_output=True,
-                text=True,
-            )
-        finally:
-            os.unlink(query_fa)
-
-        if result.returncode != 0:
-            msg = (
-                f"[kmer_hunter] ERROR: bwa mem failed"
-                f" (exit {result.returncode}):\n"
-                f"stderr: {result.stderr}"
-            )
-            if result.stdout:
-                msg += f"\nstdout: {result.stdout}"
-            sys.exit(msg)
-
-        sam_text = result.stdout
-        all_hits.extend(_parse_sam_exact(sam_text, kmer_seqs))
-
-        if batch_idx == 1:
-            # Keep the full first batch output including SAM headers.
-            sam_parts.append(sam_text)
-        else:
-            # Subsequent batches: skip header lines to avoid duplicates.
-            sam_parts.append(
-                "".join(
-                    line + "\n"
-                    for line in sam_text.splitlines()
-                    if not line.startswith("@")
-                )
-            )
-
-    combined_sam = "".join(sam_parts)
-    print(f"[kmer_hunter] {len(all_hits)} exact hit(s) found", file=sys.stderr)
-
-    return all_hits, combined_sam
+    return hits, sam_text
 
 
 # ─── Exact matching ───────────────────────────────────────────────────────────
@@ -1459,6 +1417,176 @@ def build_hit_table(hits_df: pd.DataFrame) -> go.Figure:
 # ─── HTML report ──────────────────────────────────────────────────────────────
 
 
+def _build_context_card_html(
+    total_kmers: int,
+    whole_genome_mode: bool,
+) -> str:
+    """Return the HTML body of the 'About This Report' card.
+
+    Explains the tool, the unique/multi-hit classification, and the chrY
+    functional region colour scheme so any reader arriving without context
+    can orient themselves immediately.
+    """
+    scope = (
+        "the full T2T CHM13v2.0 genome (chrY <em>and</em> all other chromosomes)"
+        if whole_genome_mode
+        else "the T2T CHM13v2.0 <strong>chrY</strong> sequence"
+    )
+
+    region_rows = "\n          ".join(
+        f'<tr>'
+        f'<td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
+        f'background:{r["color"]};vertical-align:middle"></span></td>'
+        f'<td><strong>{r["name"]}</strong></td>'
+        f'<td style="color:#7f8c8d;font-size:0.82rem">'
+        f'{r["start"]:,}&nbsp;–&nbsp;{r["end"]:,}</td>'
+        f'<td>{r["description"]}</td>'
+        f'</tr>'
+        for r in CHRY_REGIONS
+    )
+
+    return f"""
+    <p>
+      <strong>kmer_hunter</strong> searched <strong>{total_kmers:,}&nbsp;k-mer{'s' if total_kmers != 1 else ''}</strong>
+      for exact, zero-mismatch occurrences in {scope}
+      (Rhie&nbsp;et&nbsp;al.&nbsp;2023&nbsp;<em>Nature</em>&nbsp;621,&nbsp;344–354).
+      Both the forward strand and its reverse complement were scanned;
+      every occurrence — including overlapping ones — is reported.
+    </p>
+    <p>Hits are split into two categories used consistently throughout this report:</p>
+    <ul style="margin:0.4rem 0 0.8rem 1.2rem;line-height:1.7">
+      <li>
+        <strong>Unique hit</strong> — a k-mer with exactly one match anywhere in the searched genome.
+        These are the most informative for pinpointing a sequence to a specific locus.
+        Region-colour bars in the charts represent unique hits.
+      </li>
+      <li>
+        <strong>Multi-hit</strong> — a k-mer with two or more matches anywhere in the searched genome.
+        These may reflect repetitive, paralogous, or cross-chromosomal sequences.
+        Grey bars in the stacked charts represent multi-hits.
+      </li>
+    </ul>
+    <p style="margin-bottom:0.5rem">
+      The chrY sequence is divided into seven functional regions annotated below.
+      Hover over any chart element for position and region details; use legend
+      toggles to switch between unique-only and all-hit views.
+    </p>
+    <table class="files-table" style="margin-top:0.5rem">
+      <thead><tr><th></th><th>Region</th><th>Coordinates (T2T hs1)</th><th>Description</th></tr></thead>
+      <tbody>
+          {region_rows}
+      </tbody>
+    </table>"""
+
+
+
+def _build_summary_stats_html(
+    hits_df: pd.DataFrame,
+    all_kmers: list[tuple[str, str]],
+) -> str:
+    """Return an HTML string with two summary tables.
+
+    Table 1 — K-mer level:
+      how many k-mers were queried, matched uniquely, multi-hit, or absent.
+
+    Table 2 — chrY region breakdown:
+      for every CHRY_REGION, count of unique hits, multi-hits, total hits, and
+      the number/percentage of *queried k-mers* that have at least one hit there.
+    """
+    total_kmers = len(all_kmers)
+
+    def _pct(n: int, d: int) -> str:
+        return f"{100 * n / d:.1f}%" if d > 0 else "—"
+
+    if hits_df.empty:
+        unique_kmer_count = multi_kmer_count = 0
+        total_chry_unique = total_chry_multi = 0
+        kmers_any_chry = 0
+        region_rows_html = ""
+    else:
+        kmer_hit_counts = hits_df.groupby("kmer").size()
+        unique_kmers = set(kmer_hit_counts[kmer_hit_counts == 1].index)
+        multi_kmers = set(kmer_hit_counts[kmer_hit_counts > 1].index)
+        unique_kmer_count = len(unique_kmers)
+        multi_kmer_count = len(multi_kmers)
+
+        chry_hits = hits_df[hits_df["chrom"] == "chrY"]
+        is_unique = chry_hits["kmer"].isin(unique_kmers)
+        total_chry_unique = int(is_unique.sum())
+        total_chry_multi = int((~is_unique).sum())
+        kmers_any_chry = chry_hits["kmer"].nunique()
+
+        rows: list[str] = []
+        for r in CHRY_REGIONS:
+            region_name = r["name"]
+            color = r["color"]
+            mask = chry_hits["region"] == region_name
+            u = int((mask & is_unique).sum())
+            m = int((mask & ~is_unique).sum())
+            tot = u + m
+            # distinct queried k-mers with ≥1 hit in this region
+            kmers_here = int(chry_hits.loc[mask, "kmer"].nunique())
+            swatch = (
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'border-radius:3px;background:{color};vertical-align:middle;'
+                f'margin-right:6px"></span>'
+            )
+            rows.append(
+                f"<tr>"
+                f"<td>{swatch}{region_name}</td>"
+                f"<td>{u}</td><td>{_pct(u, total_chry_unique)}</td>"
+                f"<td>{m}</td><td>{_pct(m, total_chry_multi)}</td>"
+                f"<td>{tot}</td>"
+                f"<td>{kmers_here}</td><td>{_pct(kmers_here, total_kmers)}</td>"
+                f"</tr>"
+            )
+        region_rows_html = "\n        ".join(rows)
+
+    kmers_with_hits = unique_kmer_count + multi_kmer_count
+    kmers_no_hits = total_kmers - kmers_with_hits
+
+    totals_row = (
+        f"<tr style=\"font-weight:600;border-top:2px solid #bdc3c7\">"
+        f"<td>All chrY regions</td>"
+        f"<td>{total_chry_unique}</td>"
+        f"<td>{'100%' if total_chry_unique > 0 else '—'}</td>"
+        f"<td>{total_chry_multi}</td>"
+        f"<td>{'100%' if total_chry_multi > 0 else '—'}</td>"
+        f"<td>{total_chry_unique + total_chry_multi}</td>"
+        f"<td>{kmers_any_chry}</td><td>{_pct(kmers_any_chry, total_kmers)}</td>"
+        f"</tr>"
+    )
+
+    kmer_table = f"""<table class="files-table">
+      <thead><tr><th>K-mer Category</th><th>Count</th><th>% of Queried</th></tr></thead>
+      <tbody>
+        <tr><td>Total k-mers queried</td><td>{total_kmers}</td><td>100%</td></tr>
+        <tr><td>K-mers with ≥1 hit</td><td>{kmers_with_hits}</td><td>{_pct(kmers_with_hits, total_kmers)}</td></tr>
+        <tr><td>&nbsp;&nbsp;↳ Unique (exactly 1 genome-wide hit)</td><td>{unique_kmer_count}</td><td>{_pct(unique_kmer_count, total_kmers)}</td></tr>
+        <tr><td>&nbsp;&nbsp;↳ Multi-hit (≥2 genome-wide hits)</td><td>{multi_kmer_count}</td><td>{_pct(multi_kmer_count, total_kmers)}</td></tr>
+        <tr><td>K-mers with no hit</td><td>{kmers_no_hits}</td><td>{_pct(kmers_no_hits, total_kmers)}</td></tr>
+      </tbody>
+    </table>"""
+
+    region_table = f"""<table class="files-table" style="margin-top:1.5rem">
+      <thead>
+        <tr>
+          <th>chrY Region</th>
+          <th>Unique Hits</th><th>% of Unique</th>
+          <th>Multi-Hits</th><th>% of Multi</th>
+          <th>Total chrY Hits</th>
+          <th>K-mers w/ ≥1 Hit Here</th><th>% of Queried</th>
+        </tr>
+      </thead>
+      <tbody>
+        {region_rows_html}
+        {totals_row}
+      </tbody>
+    </table>"""
+
+    return kmer_table + "\n" + region_table
+
+
 def generate_html(
     karyogram: go.Figure,
     region_bar: go.Figure,
@@ -1474,10 +1602,10 @@ def generate_html(
 ) -> None:
     """Combine figures into a single self-contained HTML report.
 
-    Detailed per-hit tables are intentionally omitted from the HTML to keep
-    the report small and responsive.  Full hit listings are written to the
-    companion text files reported in *multi_match_report* and
-    *non_chry_report*.
+    Optional companion-file paths (*alignment_path*, *multi_match_report*,
+    *non_chry_report*) are surfaced in an "Output Files" card so the reader
+    knows where the full hit listings live.  Pass *non_chry_bar* and
+    *non_chry_summary* to enable the whole-genome non-chrY section.
     """
     total_kmers = len(all_kmers)
     total_hits = len(hits_df)
@@ -1488,9 +1616,17 @@ def generate_html(
         hits_df[hits_df["chrom"] == "chrY"] if not hits_df.empty else pd.DataFrame()
     )
     chry_hit_count = len(chry_hits)
-    par1_hits = int((chry_hits["region"] == "PAR1").sum()) if not chry_hits.empty else 0
-    xtr_hits = int((chry_hits["region"] == "XTR").sum()) if not chry_hits.empty else 0
-    par2_hits = int((chry_hits["region"] == "PAR2").sum()) if not chry_hits.empty else 0
+
+    # Unique hits = k-mers with exactly one genome-wide match (mirrors bar chart colours)
+    if not chry_hits.empty:
+        kmer_hit_counts = hits_df.groupby("kmer").size()
+        unique_kmers = set(kmer_hit_counts[kmer_hit_counts == 1].index)
+        is_unique_hit = chry_hits["kmer"].isin(unique_kmers)
+        par1_unique = int(((chry_hits["region"] == "PAR1") & is_unique_hit).sum())
+        xtr_unique = int(((chry_hits["region"] == "XTR") & is_unique_hit).sum())
+        par2_unique = int(((chry_hits["region"] == "PAR2") & is_unique_hit).sum())
+    else:
+        par1_unique = xtr_unique = par2_unique = 0
 
     # Interval / cluster stats
     interval_count = len(intervals_df) if intervals_df is not None and not intervals_df.empty else 0
@@ -1509,6 +1645,8 @@ def generate_html(
 
     karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
     region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
+    summary_stats_html = _build_summary_stats_html(hits_df, all_kmers)
+    context_card_html = _build_context_card_html(total_kmers, whole_genome_mode)
 
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
@@ -1727,17 +1865,29 @@ def generate_html(
         <div class="label">k-mers Not Found</div>
       </div>{chry_stat_card}{non_chry_stat_card}{interval_stat_card}{cluster_stat_card}
       <div class="stat-card par1">
-        <div class="value">{par1_hits}</div>
-        <div class="label">PAR1 Hits</div>
+        <div class="value">{par1_unique}</div>
+        <div class="label">PAR1 Unique Hits</div>
       </div>
       <div class="stat-card xtr">
-        <div class="value">{xtr_hits}</div>
-        <div class="label">XTR Hits</div>
+        <div class="value">{xtr_unique}</div>
+        <div class="label">XTR Unique Hits</div>
       </div>
       <div class="stat-card par2">
-        <div class="value">{par2_hits}</div>
-        <div class="label">PAR2 Hits</div>
+        <div class="value">{par2_unique}</div>
+        <div class="label">PAR2 Unique Hits</div>
       </div>
+    </div>
+
+    <!-- About this report -->
+    <div class="card">
+      <h2>About This Report</h2>
+      {context_card_html}
+    </div>
+
+    <!-- Summary statistics -->
+    <div class="card">
+      <h2>Summary Statistics</h2>
+      {summary_stats_html}
     </div>
 
     <!-- Karyogram -->

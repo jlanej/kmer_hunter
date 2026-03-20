@@ -16,9 +16,7 @@ visually rich, fully interactive HTML report containing:
   functional region, with **Unique Hits** (k-mers mapping exactly once
   genome-wide, shown in the region colour) and **Multi-Hit** (k-mers with two
   or more genome-wide matches, shown in grey) distinguished by colour.
-- 📋 **Hit table** — sortable table of every exact match with coordinates,
-  strand and region annotation.
-- 🔢 **Summary cards** — total k-mers, total hits, PAR1 / XTR / PAR2 hit counts.
+- 🔢 **Summary cards** — total k-mers, total hits, and unique hit counts for PAR1 / XTR / PAR2 (coloured to match the bar chart).
 
 With `--whole-genome`, the report additionally includes:
 

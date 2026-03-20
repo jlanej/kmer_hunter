@@ -603,92 +603,6 @@ class TestBwaFindExactMatches(unittest.TestCase):
         # bwa mem must NOT be called for an empty k-mer list
         mock_run.assert_not_called()
 
-    def test_batching_calls_bwa_mem_multiple_times(self):
-        """When k-mers exceed batch_size, multiple bwa mem calls are made."""
-        ref = self.tmpdir / "ref.fa"
-        ref.write_text(">chrY\nACGTACGTAC\n")
-        Path(str(ref) + ".bwt").write_text("")  # skip index
-
-        sam1 = (
-            "@HD\tVN:1.6\n"
-            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
-        )
-        sam2 = (
-            "@HD\tVN:1.6\n"
-            "k2\t0\tchrY\t2\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
-        )
-        mock1 = MagicMock(returncode=0, stdout=sam1)
-        mock2 = MagicMock(returncode=0, stdout=sam2)
-
-        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
-        with patch("subprocess.run", side_effect=[mock1, mock2]) as mock_run:
-            hits, sam_text = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
-
-        # One bwa mem call per batch
-        self.assertEqual(mock_run.call_count, 2)
-        self.assertEqual(len(hits), 2)
-        # SAM headers should appear only once in the combined output
-        self.assertEqual(sam_text.count("@HD"), 1)
-
-    def test_batching_combines_hits_from_all_batches(self):
-        """Hits from all batches are combined into the final result list."""
-        ref = self.tmpdir / "ref.fa"
-        ref.write_text(">chrY\nACGTACGTAC\n")
-        Path(str(ref) + ".bwt").write_text("")  # skip index
-
-        sam1 = (
-            "@HD\tVN:1.6\n"
-            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
-        )
-        sam2 = (
-            "@HD\tVN:1.6\n"
-            "k2\t0\tchrY\t2\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
-        )
-        mock1 = MagicMock(returncode=0, stdout=sam1)
-        mock2 = MagicMock(returncode=0, stdout=sam2)
-
-        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
-        with patch("subprocess.run", side_effect=[mock1, mock2]):
-            hits, _ = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
-
-        kmer_names = {h["kmer"] for h in hits}
-        self.assertIn("k1", kmer_names)
-        self.assertIn("k2", kmer_names)
-
-    def test_single_batch_when_kmers_within_batch_size(self):
-        """When k-mers fit within batch_size, only one bwa mem call is made."""
-        ref = self.tmpdir / "ref.fa"
-        ref.write_text(">chrY\nACGTACGTAC\n")
-        Path(str(ref) + ".bwt").write_text("")  # skip index
-
-        sam = (
-            "@HD\tVN:1.6\n"
-            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
-        )
-        mock_mem = MagicMock(returncode=0, stdout=sam)
-
-        kmers = [("k1", "ACGTACGTAC")]
-        with patch("subprocess.run", return_value=mock_mem) as mock_run:
-            hits, _ = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=100)
-
-        self.assertEqual(mock_run.call_count, 1)
-        self.assertEqual(len(hits), 1)
-
-    def test_batch_failure_exits_with_error(self):
-        """A bwa mem failure in any batch triggers SystemExit with the exit code."""
-        ref = self.tmpdir / "ref.fa"
-        ref.write_text(">chrY\nACGTACGTAC\n")
-        Path(str(ref) + ".bwt").write_text("")  # skip index
-
-        mock_ok = MagicMock(returncode=0, stdout="@HD\tVN:1.6\n")
-        mock_fail = MagicMock(returncode=-9, stderr="Killed", stdout="")
-
-        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
-        with patch("subprocess.run", side_effect=[mock_ok, mock_fail]):
-            with self.assertRaises(SystemExit) as cm:
-                kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
-
-        self.assertIn("-9", str(cm.exception.code))
 
 
 # ── Poly-A kmer integration tests ─────────────────────────────────────────────
@@ -1574,7 +1488,7 @@ class TestGenerateHtml(unittest.TestCase):
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
         self.assertTrue(Path(out).exists())
 
-    def test_html_no_full_hit_table(self):
+    def test_html_no_hit_table(self):
         """The full per-hit table should not be embedded in the HTML."""
         hits_df = self._minimal_hits()
         out = str(self.tmpdir / "report.html")
@@ -1582,8 +1496,27 @@ class TestGenerateHtml(unittest.TestCase):
         region_bar = kh.build_region_bar(hits_df)
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
         content = Path(out).read_text()
-        # The "All Exact Hits" section title should be gone
-        self.assertNotIn("All Exact Hits", content)
+        self.assertNotIn("Hit Table", content)
+
+    def test_stat_cards_display_unique_hit_counts_per_region(self):
+        """PAR1/XTR/PAR2 stat cards show unique-hit counts, matching the bar chart colour convention."""
+        # k1 has 1 genome-wide hit → unique; k2 has 2 hits → multi-hit
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT"), ("k2", "TTTT")], out)
+        content = Path(out).read_text()
+        self.assertIn("PAR1 Unique Hits", content)
+        self.assertIn("XTR Unique Hits", content)
+        self.assertIn("PAR2 Unique Hits", content)
 
     def test_alignment_path_shown_in_output_files_section(self):
         hits_df = self._minimal_hits()
@@ -1609,8 +1542,105 @@ class TestGenerateHtml(unittest.TestCase):
         content = Path(out).read_text()
         self.assertIn("/tmp/multi.txt", content)
 
+    def test_summary_stats_card_present_in_html(self):
+        """generate_html() should embed the Summary Statistics card."""
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        content = Path(out).read_text()
+        self.assertIn("Summary Statistics", content)
 
-# ── _chrom_sort_key ────────────────────────────────────────────────────────────
+    def test_about_card_present_in_html(self):
+        """generate_html() should embed the About This Report card."""
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        content = Path(out).read_text()
+        self.assertIn("About This Report", content)
+
+
+class TestBuildContextCardHtml(unittest.TestCase):
+    """Tests for _build_context_card_html()."""
+
+    def test_kmer_count_in_output(self):
+        html = kh._build_context_card_html(42, False)
+        self.assertIn("42", html)
+
+    def test_chry_only_scope(self):
+        html = kh._build_context_card_html(10, False)
+        self.assertIn("chrY", html)
+        self.assertNotIn("all other chromosomes", html)
+
+    def test_whole_genome_scope(self):
+        html = kh._build_context_card_html(10, True)
+        self.assertIn("all other chromosomes", html)
+
+    def test_all_regions_listed(self):
+        html = kh._build_context_card_html(5, False)
+        for r in ["PAR1", "XTR", "Ampliconic", "Pericentromeric", "Heterochromatin", "PAR2", "Distal Yq"]:
+            self.assertIn(r, html)
+
+    def test_unique_and_multi_hit_explained(self):
+        html = kh._build_context_card_html(5, False)
+        self.assertIn("Unique hit", html)
+        self.assertIn("Multi-hit", html)
+
+
+class TestBuildSummaryStatsHtml(unittest.TestCase):
+    """Tests for _build_summary_stats_html()."""
+
+    def _hits(self):
+        # k1: 1 genome-wide hit → unique; k2: 2 hits (chrY PAR1 + chr1) → multi-hit
+        return pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+
+    def test_kmer_category_rows_present(self):
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")])
+        self.assertIn("Total k-mers queried", html)
+        self.assertIn("Unique", html)
+        self.assertIn("Multi-hit", html)
+        self.assertIn("no hit", html)
+
+    def test_unique_kmer_percentage(self):
+        """k1 is unique (1/3 queried = 33.3%)."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")])
+        self.assertIn("33.3%", html)
+
+    def test_region_rows_present(self):
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        self.assertIn("PAR1", html)
+        self.assertIn("XTR", html)
+
+    def test_empty_hits(self):
+        html = kh._build_summary_stats_html(pd.DataFrame(), [("k1", "ACGT")])
+        self.assertIn("Total k-mers queried", html)
+        # No division errors — percentages show as dash
+        self.assertIn("—", html)
+
+    def test_kmers_with_hit_in_region_column_present(self):
+        """Region table should include K-mers w/ ≥1 Hit Here column."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        self.assertIn("K-mers w/ ≥1 Hit Here", html)
+        self.assertIn("% of Queried", html)
+
+    def test_kmers_with_hit_in_par1_percentage(self):
+        """Both k1 and k2 hit PAR1, so 2/2 queried k-mers = 100.0% for PAR1."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        # PAR1 row should show 2 k-mers, 100.0%
+        self.assertIn("100.0%", html)
+
+
+
 
 
 class TestChromSortKey(unittest.TestCase):
