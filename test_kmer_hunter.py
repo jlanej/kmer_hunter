@@ -1122,6 +1122,8 @@ class TestBuildKaryogramWithIntervals(unittest.TestCase):
         ])
         fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
         self.assertIsNotNone(fig)
+        # Y-axis must be visible (count axis)
+        self.assertTrue(fig.layout.yaxis.visible)
 
     def test_karyogram_with_clusters(self):
         hits_df = pd.DataFrame([
@@ -1132,19 +1134,28 @@ class TestBuildKaryogramWithIntervals(unittest.TestCase):
         ])
         fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
         self.assertIsNotNone(fig)
+        self.assertTrue(fig.layout.yaxis.visible)
 
     def test_karyogram_without_intervals_fallback(self):
-        """When no intervals are provided, the old-style individual markers are shown."""
+        """Test that individual markers fall back to y=1 when no intervals are provided."""
         hits_df = pd.DataFrame([
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
         ])
         fig = kh.build_karyogram(hits_df, intervals_df=None)
         self.assertIsNotNone(fig)
+        self.assertTrue(fig.layout.yaxis.visible)
 
     def test_karyogram_empty(self):
         hits_df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
         fig = kh.build_karyogram(hits_df, intervals_df=pd.DataFrame())
         self.assertIsNotNone(fig)
+        self.assertTrue(fig.layout.yaxis.visible)
+
+    def test_karyogram_yaxis_title(self):
+        """Y-axis title should reference hit count."""
+        hits_df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
+        fig = kh.build_karyogram(hits_df)
+        self.assertIn("count", fig.layout.yaxis.title.text.lower())
 
 
 # ── bwa_find_exact_matches returns sam_text ───────────────────────────────────
@@ -1171,5 +1182,173 @@ class TestBwaReturnsSamText(unittest.TestCase):
         self.assertIn("k1", sam_text)
 
 
-if __name__ == "__main__":
+# ── write_multi_match_report ──────────────────────────────────────────────────
+
+class TestWriteMultiMatchReport(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stem = str(Path(self.tmp.name) / "report")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_hits(self, kmer, n_hits, chrom="chrY"):
+        return [
+            {"kmer": kmer, "seq": "ACGTACGT", "chrom": chrom,
+             "start": 100 + i * 1000, "end": 108 + i * 1000,
+             "strand": "+", "region": "PAR1"}
+            for i in range(n_hits)
+        ]
+
+    def test_returns_none_when_empty(self):
+        result = kh.write_multi_match_report(pd.DataFrame(), self.stem)
+        self.assertIsNone(result)
+
+    def test_returns_none_when_all_single_match(self):
+        df = pd.DataFrame(self._make_hits("k1", 1))
+        result = kh.write_multi_match_report(df, self.stem)
+        self.assertIsNone(result)
+
+    def test_writes_file_for_multi_match_kmer(self):
+        df = pd.DataFrame(self._make_hits("k1", 3))
+        path = kh.write_multi_match_report(df, self.stem)
+        self.assertIsNotNone(path)
+        self.assertTrue(Path(path).exists())
+        content = Path(path).read_text()
+        self.assertIn("k1", content)
+        self.assertIn("3", content)   # total hits
+        self.assertIn("chrY", content)
+
+    def test_single_match_kmer_excluded(self):
+        rows = self._make_hits("multi", 2) + self._make_hits("single", 1)
+        df = pd.DataFrame(rows)
+        path = kh.write_multi_match_report(df, self.stem)
+        self.assertIsNotNone(path)
+        content = Path(path).read_text()
+        self.assertIn("multi", content)
+        self.assertNotIn("single", content)
+
+    def test_output_filename_contains_stem(self):
+        df = pd.DataFrame(self._make_hits("k1", 2))
+        path = kh.write_multi_match_report(df, self.stem)
+        self.assertTrue(path.startswith(self.stem))
+
+
+# ── write_non_chry_report ─────────────────────────────────────────────────────
+
+class TestWriteNonChrYReport(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stem = str(Path(self.tmp.name) / "report")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_returns_none_when_empty(self):
+        result = kh.write_non_chry_report(pd.DataFrame(), self.stem)
+        self.assertIsNone(result)
+
+    def test_returns_none_when_only_chry_hits(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.write_non_chry_report(df, self.stem)
+        self.assertIsNone(result)
+
+    def test_writes_file_for_non_chry_hits(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+        path = kh.write_non_chry_report(df, self.stem)
+        self.assertIsNotNone(path)
+        self.assertTrue(Path(path).exists())
+        content = Path(path).read_text()
+        self.assertIn("k1", content)
+        self.assertIn("chr1", content)
+
+    def test_chry_hits_excluded(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        path = kh.write_non_chry_report(df, self.stem)
+        content = Path(path).read_text()
+        self.assertIn("k1", content)
+        self.assertNotIn("k2", content)
+
+    def test_output_filename_contains_stem(self):
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrX",
+             "start": 100, "end": 104, "strand": "-", "region": "chrX"},
+        ])
+        path = kh.write_non_chry_report(df, self.stem)
+        self.assertTrue(path.startswith(self.stem))
+
+
+# ── generate_html (updated signature) ────────────────────────────────────────
+
+class TestGenerateHtml(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _minimal_hits(self):
+        return pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+
+    def test_generates_html_file(self):
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        self.assertTrue(Path(out).exists())
+
+    def test_html_no_full_hit_table(self):
+        """The full per-hit table should not be embedded in the HTML."""
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        content = Path(out).read_text()
+        # The "All Exact Hits" section title should be gone
+        self.assertNotIn("All Exact Hits", content)
+
+    def test_alignment_path_shown_in_output_files_section(self):
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(
+            karyogram, region_bar, hits_df, [("k1", "ACGT")], out,
+            alignment_path="/tmp/hits.sam",
+        )
+        content = Path(out).read_text()
+        self.assertIn("/tmp/hits.sam", content)
+
+    def test_multi_match_report_shown_in_output_files_section(self):
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(
+            karyogram, region_bar, hits_df, [("k1", "ACGT")], out,
+            multi_match_report="/tmp/multi.txt",
+        )
+        content = Path(out).read_text()
+        self.assertIn("/tmp/multi.txt", content)
+
+
+
+if __name__ == '__main__':
     unittest.main()
