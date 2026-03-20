@@ -1552,6 +1552,43 @@ class TestGenerateHtml(unittest.TestCase):
         content = Path(out).read_text()
         self.assertIn("Summary Statistics", content)
 
+    def test_about_card_present_in_html(self):
+        """generate_html() should embed the About This Report card."""
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        content = Path(out).read_text()
+        self.assertIn("About This Report", content)
+
+
+class TestBuildContextCardHtml(unittest.TestCase):
+    """Tests for _build_context_card_html()."""
+
+    def test_kmer_count_in_output(self):
+        html = kh._build_context_card_html(42, False)
+        self.assertIn("42", html)
+
+    def test_chry_only_scope(self):
+        html = kh._build_context_card_html(10, False)
+        self.assertIn("chrY", html)
+        self.assertNotIn("all other chromosomes", html)
+
+    def test_whole_genome_scope(self):
+        html = kh._build_context_card_html(10, True)
+        self.assertIn("all other chromosomes", html)
+
+    def test_all_regions_listed(self):
+        html = kh._build_context_card_html(5, False)
+        for r in ["PAR1", "XTR", "Ampliconic", "Pericentromeric", "Heterochromatin", "PAR2", "Distal Yq"]:
+            self.assertIn(r, html)
+
+    def test_unique_and_multi_hit_explained(self):
+        html = kh._build_context_card_html(5, False)
+        self.assertIn("Unique hit", html)
+        self.assertIn("Multi-hit", html)
+
 
 class TestBuildSummaryStatsHtml(unittest.TestCase):
     """Tests for _build_summary_stats_html()."""

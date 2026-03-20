@@ -1417,6 +1417,69 @@ def build_hit_table(hits_df: pd.DataFrame) -> go.Figure:
 # ─── HTML report ──────────────────────────────────────────────────────────────
 
 
+def _build_context_card_html(
+    total_kmers: int,
+    whole_genome_mode: bool,
+) -> str:
+    """Return the HTML body of the 'About This Report' card.
+
+    Explains the tool, the unique/multi-hit classification, and the chrY
+    functional region colour scheme so any reader arriving without context
+    can orient themselves immediately.
+    """
+    scope = (
+        "the full T2T CHM13v2.0 genome (chrY <em>and</em> all other chromosomes)"
+        if whole_genome_mode
+        else "the T2T CHM13v2.0 <strong>chrY</strong> sequence"
+    )
+
+    region_rows = "\n          ".join(
+        f'<tr>'
+        f'<td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
+        f'background:{r["color"]};vertical-align:middle"></span></td>'
+        f'<td><strong>{r["name"]}</strong></td>'
+        f'<td style="color:#7f8c8d;font-size:0.82rem">'
+        f'{r["start"]:,}&nbsp;–&nbsp;{r["end"]:,}</td>'
+        f'<td>{r["description"]}</td>'
+        f'</tr>'
+        for r in CHRY_REGIONS
+    )
+
+    return f"""
+    <p>
+      <strong>kmer_hunter</strong> searched <strong>{total_kmers:,}&nbsp;k-mer{'s' if total_kmers != 1 else ''}</strong>
+      for exact, zero-mismatch occurrences in {scope}
+      (Rhie&nbsp;et&nbsp;al.&nbsp;2023&nbsp;<em>Nature</em>&nbsp;621,&nbsp;344–354).
+      Both the forward strand and its reverse complement were scanned;
+      every occurrence — including overlapping ones — is reported.
+    </p>
+    <p>Hits are split into two categories used consistently throughout this report:</p>
+    <ul style="margin:0.4rem 0 0.8rem 1.2rem;line-height:1.7">
+      <li>
+        <strong>Unique hit</strong> — a k-mer with exactly one match anywhere in the searched genome.
+        These are the most informative for pinpointing a sequence to a specific locus.
+        Region-colour bars in the charts represent unique hits.
+      </li>
+      <li>
+        <strong>Multi-hit</strong> — a k-mer with two or more matches anywhere in the searched genome.
+        These may reflect repetitive, paralogous, or cross-chromosomal sequences.
+        Grey bars in the stacked charts represent multi-hits.
+      </li>
+    </ul>
+    <p style="margin-bottom:0.5rem">
+      The chrY sequence is divided into seven functional regions annotated below.
+      Hover over any chart element for position and region details; use legend
+      toggles to switch between unique-only and all-hit views.
+    </p>
+    <table class="files-table" style="margin-top:0.5rem">
+      <thead><tr><th></th><th>Region</th><th>Coordinates (T2T hs1)</th><th>Description</th></tr></thead>
+      <tbody>
+          {region_rows}
+      </tbody>
+    </table>"""
+
+
+
 def _build_summary_stats_html(
     hits_df: pd.DataFrame,
     all_kmers: list[tuple[str, str]],
@@ -1583,6 +1646,7 @@ def generate_html(
     karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
     region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
     summary_stats_html = _build_summary_stats_html(hits_df, all_kmers)
+    context_card_html = _build_context_card_html(total_kmers, whole_genome_mode)
 
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
@@ -1812,6 +1876,12 @@ def generate_html(
         <div class="value">{par2_unique}</div>
         <div class="label">PAR2 Unique Hits</div>
       </div>
+    </div>
+
+    <!-- About this report -->
+    <div class="card">
+      <h2>About This Report</h2>
+      {context_card_html}
     </div>
 
     <!-- Summary statistics -->
