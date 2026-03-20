@@ -548,10 +548,48 @@ class TestBwaFindExactMatches(unittest.TestCase):
         mock_fail = MagicMock()
         mock_fail.returncode = 1
         mock_fail.stderr = "bwa error"
+        mock_fail.stdout = ""
 
         with patch("subprocess.run", return_value=mock_fail):
             with self.assertRaises(SystemExit):
                 kh.bwa_find_exact_matches([("k1", "ACGT")], str(ref))
+
+    def test_bwa_mem_failure_message_includes_exit_code(self):
+        """Error message must contain the exit code and stderr output."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGT\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        mock_fail = MagicMock()
+        mock_fail.returncode = 42
+        mock_fail.stderr = "[M::bwa_idx_load_from_disk] read 0 ALT contigs\n"
+        mock_fail.stdout = ""
+
+        with patch("subprocess.run", return_value=mock_fail):
+            with self.assertRaises(SystemExit) as cm:
+                kh.bwa_find_exact_matches([("k1", "ACGT")], str(ref))
+
+        msg = str(cm.exception.code)
+        self.assertIn("42", msg)
+        self.assertIn("read 0 ALT contigs", msg)
+
+    def test_bwa_mem_failure_message_includes_stdout_when_present(self):
+        """stdout is appended to the error message when non-empty."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGT\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        mock_fail = MagicMock()
+        mock_fail.returncode = 1
+        mock_fail.stderr = ""
+        mock_fail.stdout = "unexpected bwa stdout output\n"
+
+        with patch("subprocess.run", return_value=mock_fail):
+            with self.assertRaises(SystemExit) as cm:
+                kh.bwa_find_exact_matches([("k1", "ACGT")], str(ref))
+
+        msg = str(cm.exception.code)
+        self.assertIn("unexpected bwa stdout output", msg)
 
     def test_empty_kmers_returns_empty(self):
         ref = self.tmpdir / "ref.fa"
