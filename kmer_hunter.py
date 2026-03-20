@@ -464,7 +464,14 @@ def bwa_find_exact_matches(
             text=True,
         )
         if result.returncode != 0:
-            sys.exit(f"[kmer_hunter] ERROR: bwa mem failed:\n{result.stderr}")
+            msg = (
+                f"[kmer_hunter] ERROR: bwa mem failed"
+                f" (exit {result.returncode}):\n"
+                f"stderr: {result.stderr}"
+            )
+            if result.stdout:
+                msg += f"\nstdout: {result.stdout}"
+            sys.exit(msg)
         sam_text = result.stdout
         hits = _parse_sam_exact(sam_text, kmer_seqs)
         print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
