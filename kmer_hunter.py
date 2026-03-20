@@ -1446,9 +1446,17 @@ def generate_html(
         hits_df[hits_df["chrom"] == "chrY"] if not hits_df.empty else pd.DataFrame()
     )
     chry_hit_count = len(chry_hits)
-    par1_hits = int((chry_hits["region"] == "PAR1").sum()) if not chry_hits.empty else 0
-    xtr_hits = int((chry_hits["region"] == "XTR").sum()) if not chry_hits.empty else 0
-    par2_hits = int((chry_hits["region"] == "PAR2").sum()) if not chry_hits.empty else 0
+
+    # Unique hits = k-mers with exactly one genome-wide match (mirrors bar chart colours)
+    if not chry_hits.empty:
+        kmer_hit_counts = hits_df.groupby("kmer").size()
+        unique_kmers = set(kmer_hit_counts[kmer_hit_counts == 1].index)
+        is_unique_hit = chry_hits["kmer"].isin(unique_kmers)
+        par1_unique = int(((chry_hits["region"] == "PAR1") & is_unique_hit).sum())
+        xtr_unique = int(((chry_hits["region"] == "XTR") & is_unique_hit).sum())
+        par2_unique = int(((chry_hits["region"] == "PAR2") & is_unique_hit).sum())
+    else:
+        par1_unique = xtr_unique = par2_unique = 0
 
     # Interval / cluster stats
     interval_count = len(intervals_df) if intervals_df is not None and not intervals_df.empty else 0
@@ -1467,10 +1475,6 @@ def generate_html(
 
     karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
     region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
-
-    hit_table_html = to_html(
-        build_hit_table(hits_df), full_html=False, include_plotlyjs=False
-    )
 
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
@@ -1689,16 +1693,16 @@ def generate_html(
         <div class="label">k-mers Not Found</div>
       </div>{chry_stat_card}{non_chry_stat_card}{interval_stat_card}{cluster_stat_card}
       <div class="stat-card par1">
-        <div class="value">{par1_hits}</div>
-        <div class="label">PAR1 Hits</div>
+        <div class="value">{par1_unique}</div>
+        <div class="label">PAR1 Unique Hits</div>
       </div>
       <div class="stat-card xtr">
-        <div class="value">{xtr_hits}</div>
-        <div class="label">XTR Hits</div>
+        <div class="value">{xtr_unique}</div>
+        <div class="label">XTR Unique Hits</div>
       </div>
       <div class="stat-card par2">
-        <div class="value">{par2_hits}</div>
-        <div class="label">PAR2 Hits</div>
+        <div class="value">{par2_unique}</div>
+        <div class="label">PAR2 Unique Hits</div>
       </div>
     </div>
 
@@ -1713,12 +1717,6 @@ def generate_html(
     <div class="card">
       <h2>Hits per Functional Region</h2>
       {region_bar_html}
-    </div>
-
-    <!-- Hit table -->
-    <div class="card">
-      <h2>Hit Table</h2>
-      {hit_table_html}
     </div>
 {non_chry_section}
 {output_files_section}

@@ -1488,15 +1488,35 @@ class TestGenerateHtml(unittest.TestCase):
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
         self.assertTrue(Path(out).exists())
 
-    def test_html_includes_hit_table(self):
-        """The HTML report should embed the hit table."""
+    def test_html_no_hit_table(self):
+        """The full per-hit table should not be embedded in the HTML."""
         hits_df = self._minimal_hits()
         out = str(self.tmpdir / "report.html")
         karyogram = kh.build_karyogram(hits_df)
         region_bar = kh.build_region_bar(hits_df)
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
         content = Path(out).read_text()
-        self.assertIn("Hit Table", content)
+        self.assertNotIn("Hit Table", content)
+
+    def test_stat_cards_display_unique_hit_counts_per_region(self):
+        """PAR1/XTR/PAR2 stat cards show unique-hit counts, matching the bar chart colour convention."""
+        # k1 has 1 genome-wide hit → unique; k2 has 2 hits → multi-hit
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT"), ("k2", "TTTT")], out)
+        content = Path(out).read_text()
+        self.assertIn("PAR1 Unique Hits", content)
+        self.assertIn("XTR Unique Hits", content)
+        self.assertIn("PAR2 Unique Hits", content)
 
     def test_alignment_path_shown_in_output_files_section(self):
         hits_df = self._minimal_hits()
