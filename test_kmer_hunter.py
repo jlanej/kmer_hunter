@@ -1590,6 +1590,18 @@ class TestBuildSummaryStatsHtml(unittest.TestCase):
         # No division errors — percentages show as dash
         self.assertIn("—", html)
 
+    def test_kmers_with_hit_in_region_column_present(self):
+        """Region table should include K-mers w/ ≥1 Hit Here column."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        self.assertIn("K-mers w/ ≥1 Hit Here", html)
+        self.assertIn("% of Queried", html)
+
+    def test_kmers_with_hit_in_par1_percentage(self):
+        """Both k1 and k2 hit PAR1, so 2/2 queried k-mers = 100.0% for PAR1."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        # PAR1 row should show 2 k-mers, 100.0%
+        self.assertIn("100.0%", html)
+
 
 
 

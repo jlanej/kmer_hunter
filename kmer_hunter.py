@@ -1427,8 +1427,8 @@ def _build_summary_stats_html(
       how many k-mers were queried, matched uniquely, multi-hit, or absent.
 
     Table 2 — chrY region breakdown:
-      for every CHRY_REGION, count of unique hits, multi-hits and total, plus
-      the percentage each category represents of the genome-wide totals.
+      for every CHRY_REGION, count of unique hits, multi-hits, total hits, and
+      the number/percentage of *queried k-mers* that have at least one hit there.
     """
     total_kmers = len(all_kmers)
 
@@ -1438,6 +1438,7 @@ def _build_summary_stats_html(
     if hits_df.empty:
         unique_kmer_count = multi_kmer_count = 0
         total_chry_unique = total_chry_multi = 0
+        kmers_any_chry = 0
         region_rows_html = ""
     else:
         kmer_hit_counts = hits_df.groupby("kmer").size()
@@ -1450,6 +1451,7 @@ def _build_summary_stats_html(
         is_unique = chry_hits["kmer"].isin(unique_kmers)
         total_chry_unique = int(is_unique.sum())
         total_chry_multi = int((~is_unique).sum())
+        kmers_any_chry = chry_hits["kmer"].nunique()
 
         rows: list[str] = []
         for r in CHRY_REGIONS:
@@ -1459,6 +1461,8 @@ def _build_summary_stats_html(
             u = int((mask & is_unique).sum())
             m = int((mask & ~is_unique).sum())
             tot = u + m
+            # distinct queried k-mers with ≥1 hit in this region
+            kmers_here = int(chry_hits.loc[mask, "kmer"].nunique())
             swatch = (
                 f'<span style="display:inline-block;width:12px;height:12px;'
                 f'border-radius:3px;background:{color};vertical-align:middle;'
@@ -1470,6 +1474,7 @@ def _build_summary_stats_html(
                 f"<td>{u}</td><td>{_pct(u, total_chry_unique)}</td>"
                 f"<td>{m}</td><td>{_pct(m, total_chry_multi)}</td>"
                 f"<td>{tot}</td>"
+                f"<td>{kmers_here}</td><td>{_pct(kmers_here, total_kmers)}</td>"
                 f"</tr>"
             )
         region_rows_html = "\n        ".join(rows)
@@ -1485,6 +1490,7 @@ def _build_summary_stats_html(
         f"<td>{total_chry_multi}</td>"
         f"<td>{'100%' if total_chry_multi > 0 else '—'}</td>"
         f"<td>{total_chry_unique + total_chry_multi}</td>"
+        f"<td>{kmers_any_chry}</td><td>{_pct(kmers_any_chry, total_kmers)}</td>"
         f"</tr>"
     )
 
@@ -1506,6 +1512,7 @@ def _build_summary_stats_html(
           <th>Unique Hits</th><th>% of Unique</th>
           <th>Multi-Hits</th><th>% of Multi</th>
           <th>Total chrY Hits</th>
+          <th>K-mers w/ ≥1 Hit Here</th><th>% of Queried</th>
         </tr>
       </thead>
       <tbody>
