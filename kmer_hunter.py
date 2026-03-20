@@ -623,10 +623,28 @@ def detect_clusters(
     return df
 
 
+def _chrom_sort_key(chrom: str) -> tuple[int, str]:
+    """Natural sort key for chromosome names.
+
+    Orders chromosomes as chr1, chr2, …, chr22, chrX, chrY, chrM, then any
+    remaining names alphabetically.  This avoids the lexicographic ordering
+    (chr1, chr10, chr11, …) that would otherwise result from a plain sort.
+    """
+    _named = {"chrX": 23, "chrY": 24, "chrM": 25}
+    if chrom in _named:
+        return (_named[chrom], "")
+    m = re.match(r"chr(\d+)$", chrom)
+    if m:
+        return (int(m.group(1)), chrom)
+    return (99, chrom)
+
+
 def build_non_chry_summary(hits_df: pd.DataFrame) -> go.Figure:
     """Summary table of non-chrY hits grouped by chromosome.
 
     Shows chromosome, total hits, and number of distinct k-mers matched.
+    Chromosomes are listed in natural genomic order (chr1, chr2, …, chr22,
+    chrX, chrY, chrM) rather than lexicographic order.
     """
     non_chry = (
         hits_df[hits_df["chrom"] != "chrY"]
@@ -641,7 +659,9 @@ def build_non_chry_summary(hits_df: pd.DataFrame) -> go.Figure:
             total_hits=("chrom", "size"),
             distinct_kmers=("kmer", "nunique"),
         ).reset_index()
-        display = summary.sort_values("chrom").reset_index(drop=True)
+        display = summary.iloc[
+            sorted(range(len(summary)), key=lambda i: _chrom_sort_key(summary["chrom"].iloc[i]))
+        ].reset_index(drop=True)
 
     fig = go.Figure(
         go.Table(
@@ -1153,7 +1173,20 @@ def build_karyogram(
 
 
 def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
-    """Bar chart: number of exact hits per chrY functional region."""
+    """Bar chart: number of exact hits per chrY functional region.
+
+    Two stacked bar traces distinguish hit categories:
+
+    * **Unique Hits** (solid region colour) — hits from k-mers that appear
+      exactly once across the entire genome-wide hit set.  These reflect
+      sequence elements that map uniquely and are most informative for
+      localising a k-mer to a specific chrY region.
+    * **Multi-Hit** (light grey) — hits from k-mers with two or more
+      genome-wide matches.  These may reflect repetitive, paralogous, or
+      cross-chromosomal sequences.
+
+    The stacked height of both bars equals the total hit count for the region.
+    """
     chry_hits = (
         hits_df[hits_df["chrom"] == "chrY"]
         if not hits_df.empty
@@ -1162,37 +1195,69 @@ def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
 
     region_names = [r["name"] for r in CHRY_REGIONS]
     region_colors = {r["name"]: r["color"] for r in CHRY_REGIONS}
-    counts = {r: 0 for r in region_names}
+    unique_counts: dict[str, int] = {r: 0 for r in region_names}
+    multi_counts: dict[str, int] = {r: 0 for r in region_names}
 
     if not chry_hits.empty:
-        for region, cnt in chry_hits["region"].value_counts().items():
-            if region in counts:
-                counts[region] = int(cnt)
+        # k-mers with exactly one hit genome-wide (all chromosomes, not just chrY)
+        kmer_hit_counts = hits_df.groupby("kmer").size()
+        unique_kmers: set[str] = set(kmer_hit_counts[kmer_hit_counts == 1].index)
 
-    fig = go.Figure(
+        is_unique = chry_hits["kmer"].isin(unique_kmers)
+        for region, grp_idx in chry_hits.groupby("region").groups.items():
+            if region in unique_counts:
+                u = int(is_unique.loc[grp_idx].sum())
+                unique_counts[region] = u
+                multi_counts[region] = len(grp_idx) - u
+
+    colors = [region_colors[r] for r in region_names]
+
+    fig = go.Figure()
+
+    # Trace 1: Unique Hits — solid region colour (bottom of stack)
+    fig.add_trace(
         go.Bar(
             x=region_names,
-            y=[counts[r] for r in region_names],
-            marker_color=[region_colors[r] for r in region_names],
-            text=[counts[r] for r in region_names],
-            textposition="auto",
-            hovertemplate="<b>%{x}</b><br>Hits: %{y}<extra></extra>",
+            y=[unique_counts[r] for r in region_names],
+            name="Unique Hits",
+            marker_color=colors,
+            marker_opacity=0.9,
+            hovertemplate="<b>%{x}</b><br>Unique Hits: %{y}<extra></extra>",
         )
     )
+
+    # Trace 2: Multi-Hit — light grey (top of stack)
+    fig.add_trace(
+        go.Bar(
+            x=region_names,
+            y=[multi_counts[r] for r in region_names],
+            name="Multi-Hit",
+            marker_color="#bdc3c7",
+            marker_opacity=0.85,
+            hovertemplate="<b>%{x}</b><br>Multi-Hit: %{y}<extra></extra>",
+        )
+    )
+
     fig.update_layout(
         title="Exact k-mer Hits by chrY Functional Region",
         xaxis_title="Region",
         yaxis_title="Number of Exact Hits",
+        barmode="stack",
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=350,
         margin=dict(t=60, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     return fig
 
 
 def build_non_chry_bar(hits_df: pd.DataFrame) -> go.Figure:
-    """Bar chart: exact hits per non-chrY chromosome."""
+    """Bar chart: exact hits per non-chrY chromosome.
+
+    Chromosomes are displayed in natural genomic order (chr1, chr2, …, chr22,
+    chrX, chrY, chrM) rather than lexicographic order.
+    """
     non_chry = (
         hits_df[hits_df["chrom"] != "chrY"]
         if not hits_df.empty
@@ -1203,9 +1268,9 @@ def build_non_chry_bar(hits_df: pd.DataFrame) -> go.Figure:
         chrom_names: list[str] = []
         chrom_counts_vals: list[int] = []
     else:
-        vc = non_chry["chrom"].value_counts().sort_index()
-        chrom_names = vc.index.tolist()
-        chrom_counts_vals = [int(v) for v in vc.values]
+        vc = non_chry["chrom"].value_counts()
+        chrom_names = sorted(vc.index.tolist(), key=_chrom_sort_key)
+        chrom_counts_vals = [int(vc[c]) for c in chrom_names]
 
     fig = go.Figure(
         go.Bar(
@@ -1230,7 +1295,11 @@ def build_non_chry_bar(hits_df: pd.DataFrame) -> go.Figure:
 
 
 def build_non_chry_table(hits_df: pd.DataFrame) -> go.Figure:
-    """Interactive sortable table of non-chrY exact hits."""
+    """Interactive sortable table of non-chrY exact hits.
+
+    Rows are sorted in natural genomic chromosome order (chr1, chr2, …, chr22,
+    chrX, chrY, chrM) and then by start position within each chromosome.
+    """
     non_chry = (
         hits_df[hits_df["chrom"] != "chrY"]
         if not hits_df.empty
@@ -1245,7 +1314,11 @@ def build_non_chry_table(hits_df: pd.DataFrame) -> go.Figure:
         display = non_chry[
             ["kmer", "chrom", "start", "end", "strand", "seq"]
         ].copy()
-        display = display.sort_values(["chrom", "start"]).reset_index(drop=True)
+        sort_idx = sorted(
+            range(len(display)),
+            key=lambda i: (_chrom_sort_key(display["chrom"].iat[i]), display["start"].iat[i]),
+        )
+        display = display.iloc[sort_idx].reset_index(drop=True)
 
     fig = go.Figure(
         go.Table(

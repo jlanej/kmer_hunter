@@ -1468,6 +1468,195 @@ class TestGenerateHtml(unittest.TestCase):
         self.assertIn("/tmp/multi.txt", content)
 
 
+# ── _chrom_sort_key ────────────────────────────────────────────────────────────
+
+
+class TestChromSortKey(unittest.TestCase):
+    """Natural genomic ordering for chromosome names."""
+
+    def test_numbered_chromosomes_ordered_numerically(self):
+        chroms = ["chr10", "chr2", "chr1", "chr22"]
+        self.assertEqual(
+            sorted(chroms, key=kh._chrom_sort_key),
+            ["chr1", "chr2", "chr10", "chr22"],
+        )
+
+    def test_sex_chromosomes_after_autosomes(self):
+        chroms = ["chrX", "chr1", "chrY", "chr22"]
+        result = sorted(chroms, key=kh._chrom_sort_key)
+        self.assertLess(result.index("chr1"), result.index("chrX"))
+        self.assertLess(result.index("chrX"), result.index("chrY"))
+
+    def test_chrM_after_chrY(self):
+        chroms = ["chrM", "chrY", "chrX"]
+        result = sorted(chroms, key=kh._chrom_sort_key)
+        self.assertEqual(result, ["chrX", "chrY", "chrM"])
+
+    def test_non_standard_names_at_end(self):
+        chroms = ["chr1_random", "chr1"]
+        result = sorted(chroms, key=kh._chrom_sort_key)
+        self.assertEqual(result[0], "chr1")
+        self.assertEqual(result[-1], "chr1_random")
+
+    def test_full_ordering(self):
+        chroms = ["chrM", "chrX", "chr2", "chr11", "chr1", "chrY"]
+        result = sorted(chroms, key=kh._chrom_sort_key)
+        self.assertEqual(result, ["chr1", "chr2", "chr11", "chrX", "chrY", "chrM"])
+
+
+# ── build_region_bar (unique / multi-hit split) ───────────────────────────────
+
+
+class TestBuildRegionBar(unittest.TestCase):
+    """Tests for the stacked unique/multi-hit region bar chart."""
+
+    def _hits(self, rows):
+        return pd.DataFrame(rows)
+
+    def test_returns_figure(self):
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        self.assertIsNotNone(fig)
+
+    def test_two_traces_present(self):
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        self.assertEqual(len(fig.data), 2)
+
+    def test_trace_names(self):
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        names = [t.name for t in fig.data]
+        self.assertIn("Unique Hits", names)
+        self.assertIn("Multi-Hit", names)
+
+    def test_unique_hit_counted_in_unique_trace(self):
+        # k1 appears once genome-wide → unique
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        unique_trace = next(t for t in fig.data if t.name == "Unique Hits")
+        multi_trace = next(t for t in fig.data if t.name == "Multi-Hit")
+        par1_idx = [r["name"] for r in kh.CHRY_REGIONS].index("PAR1")
+        self.assertEqual(unique_trace.y[par1_idx], 1)
+        self.assertEqual(multi_trace.y[par1_idx], 0)
+
+    def test_multi_hit_kmer_counted_in_multi_trace(self):
+        # k1 appears twice genome-wide → multi-hit
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        unique_trace = next(t for t in fig.data if t.name == "Unique Hits")
+        multi_trace = next(t for t in fig.data if t.name == "Multi-Hit")
+        par1_idx = [r["name"] for r in kh.CHRY_REGIONS].index("PAR1")
+        self.assertEqual(unique_trace.y[par1_idx], 0)
+        self.assertEqual(multi_trace.y[par1_idx], 2)
+
+    def test_stacked_total_equals_hit_count(self):
+        # 2 unique + 2 multi-hit in PAR1
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+            {"kmer": "k3", "seq": "CCCC", "chrom": "chrY",
+             "start": 300, "end": 304, "strand": "+", "region": "PAR1"},
+            {"kmer": "k3", "seq": "CCCC", "chrom": "chrY",
+             "start": 400, "end": 404, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        unique_trace = next(t for t in fig.data if t.name == "Unique Hits")
+        multi_trace = next(t for t in fig.data if t.name == "Multi-Hit")
+        par1_idx = [r["name"] for r in kh.CHRY_REGIONS].index("PAR1")
+        total = unique_trace.y[par1_idx] + multi_trace.y[par1_idx]
+        self.assertEqual(total, 4)
+
+    def test_genome_wide_unique_uses_all_hits(self):
+        # k1 hits chrY once and chr1 once → multi-hit genome-wide
+        hits_df = self._hits([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+        fig = kh.build_region_bar(hits_df)
+        unique_trace = next(t for t in fig.data if t.name == "Unique Hits")
+        multi_trace = next(t for t in fig.data if t.name == "Multi-Hit")
+        par1_idx = [r["name"] for r in kh.CHRY_REGIONS].index("PAR1")
+        # k1 has 2 genome-wide hits → multi, not unique
+        self.assertEqual(unique_trace.y[par1_idx], 0)
+        self.assertEqual(multi_trace.y[par1_idx], 1)
+
+    def test_empty_dataframe_returns_figure(self):
+        hits_df = pd.DataFrame(
+            columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
+        )
+        fig = kh.build_region_bar(hits_df)
+        self.assertIsNotNone(fig)
+        self.assertEqual(len(fig.data), 2)
+
+    def test_barmode_is_stack(self):
+        hits_df = pd.DataFrame(
+            columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
+        )
+        fig = kh.build_region_bar(hits_df)
+        self.assertEqual(fig.layout.barmode, "stack")
+
+
+# ── non-chrY chromosome natural sort in display functions ─────────────────────
+
+
+class TestNonChryNaturalSort(unittest.TestCase):
+    """Chromosome sort order is natural (chr1 < chr2 < … < chrX < chrY < chrM)."""
+
+    def _multi_chrom_hits(self):
+        return pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr10",
+             "start": 100, "end": 104, "strand": "+", "region": "chr10"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chr2",
+             "start": 200, "end": 204, "strand": "+", "region": "chr2"},
+            {"kmer": "k3", "seq": "CCCC", "chrom": "chr1",
+             "start": 300, "end": 304, "strand": "+", "region": "chr1"},
+        ])
+
+    def test_build_non_chry_bar_natural_order(self):
+        hits_df = self._multi_chrom_hits()
+        fig = kh.build_non_chry_bar(hits_df)
+        x = list(fig.data[0].x)
+        self.assertLess(x.index("chr1"), x.index("chr2"))
+        self.assertLess(x.index("chr2"), x.index("chr10"))
+
+    def test_build_non_chry_summary_natural_order(self):
+        hits_df = self._multi_chrom_hits()
+        fig = kh.build_non_chry_summary(hits_df)
+        chrom_col = list(fig.data[0].cells.values[0])
+        self.assertLess(chrom_col.index("chr1"), chrom_col.index("chr2"))
+        self.assertLess(chrom_col.index("chr2"), chrom_col.index("chr10"))
+
+    def test_build_non_chry_table_natural_order(self):
+        hits_df = self._multi_chrom_hits()
+        fig = kh.build_non_chry_table(hits_df)
+        chrom_col = list(fig.data[0].cells.values[1])  # column 1 is "chrom"
+        # chr1 row appears before chr2, which appears before chr10
+        self.assertLess(chrom_col.index("chr1"), chrom_col.index("chr2"))
+        self.assertLess(chrom_col.index("chr2"), chrom_col.index("chr10"))
+
+
 # ── Performance regression tests ──────────────────────────────────────────────
 
 
