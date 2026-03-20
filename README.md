@@ -10,15 +10,20 @@ visually rich, fully interactive HTML report containing:
 
 - 🗺️ **chrY karyogram** — interactive Plotly chart with colour-coded PAR1,
   XTR, Ampliconic, Pericentromeric, Heterochromatin, PAR2 and Distal-Yq bands,
-  with hit markers that show kmer name, position and region on hover.
-- 📊 **Region bar chart** — exact hit counts per functional region.
+  with hit markers that show kmer name, position and region on hover.  Toggle
+  between *Unique Hits Only* and *All Hits* views.
+- 📊 **Region bar chart** — stacked bar chart of exact hit counts per
+  functional region, with **Unique Hits** (k-mers mapping exactly once
+  genome-wide, shown in the region colour) and **Multi-Hit** (k-mers with two
+  or more genome-wide matches, shown in grey) distinguished by colour.
 - 📋 **Hit table** — sortable table of every exact match with coordinates,
   strand and region annotation.
 - 🔢 **Summary cards** — total k-mers, total hits, PAR1 / XTR / PAR2 hit counts.
 
 With `--whole-genome`, the report additionally includes:
 
-- 🌐 **Non-chrY bar chart** — hit counts broken down by non-chrY chromosome.
+- 🌐 **Non-chrY bar chart** — hit counts broken down by non-chrY chromosome,
+  listed in natural genomic order (chr1, chr2, …, chr22, chrX, chrY, chrM).
 - 📋 **Non-chrY hit table** — all hits found outside chrY with chromosome,
   coordinates, strand and k-mer sequence.
 - 🔢 **Non-chrY & chrY hit count cards** — at-a-glance comparison.
@@ -132,8 +137,10 @@ kmer_hunter kmers.txt \
 The report will include two additional sections:
 
 1. **Non-chrY Hits by Chromosome** — bar chart of hit counts per chromosome
-   (excluding chrY).
-2. **Non-chrY Exact Hit Details** — full table of all hits outside chrY.
+   (excluding chrY), listed in natural genomic order (chr1, chr2, …, chr22,
+   chrX, chrY, chrM).
+2. **Non-chrY Exact Hit Details** — full table of all hits outside chrY, also
+   sorted in natural genomic chromosome order.
 
 Summary stat cards for **chrY Hits** and **Non-chrY Hits** are also added so
 the specificity of each k-mer is immediately visible.
