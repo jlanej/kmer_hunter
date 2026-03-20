@@ -332,12 +332,6 @@ def read_fasta(path: str) -> dict[str, str]:
 
 # ─── BWA-based exact matching ─────────────────────────────────────────────────
 
-# Maximum number of k-mers per bwa mem invocation.  Submitting millions of
-# sequences in a single call exhausts BWA's internal memory and triggers an
-# OOM kill (exit -9).  Batching keeps peak resident memory manageable.
-BWA_BATCH_SIZE = 50_000
-
-
 def ensure_bwa_index(ref_path: str) -> None:
     """Build a BWA index for *ref_path* unless one already exists.
 
@@ -422,28 +416,22 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
 def bwa_find_exact_matches(
     kmers: list[tuple[str, str]],
     ref_path: str,
-    batch_size: int = BWA_BATCH_SIZE,
 ) -> tuple[list[dict], str]:
     """Find all exact k-mer matches using BWA mem.
 
     This is orders of magnitude faster than Python string search for large
-    k-mer sets.  BWA mem is invoked with settings that strongly penalise
-    mismatches, gaps, and soft-clipping so that only perfect full-length
-    alignments score above the reporting threshold.  The SAM output is then
-    filtered through ``_parse_sam_exact`` for additional correctness.
-
-    Large k-mer sets are automatically split into batches of *batch_size*
-    k-mers.  Each batch is written to a temporary FASTA file and submitted to
-    a separate ``bwa mem`` invocation.  Results are merged before returning.
-    This prevents OOM kills when searching millions of k-mers at once.
+    k-mer sets.  BWA mem is invoked once for the entire k-mer collection with
+    settings that strongly penalise mismatches, gaps, and soft-clipping so
+    that only perfect full-length alignments score above the reporting
+    threshold.  The SAM output is then filtered through ``_parse_sam_exact``
+    for additional correctness.
 
     The BWA index is built automatically (see :func:`ensure_bwa_index`) unless
     it already exists alongside *ref_path*.
 
-    Returns ``(hits, sam_text)`` where *sam_text* is the concatenated raw SAM
-    output from all BWA batches (SAM headers kept from the first batch only).
-    Call :func:`save_alignment_file` separately if you need to persist the
-    alignments.
+    Returns ``(hits, sam_text)`` where *sam_text* is the raw SAM output from
+    BWA.  Call :func:`save_alignment_file` separately if you need to persist
+    the alignments.
     """
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
@@ -451,83 +439,53 @@ def bwa_find_exact_matches(
     if not kmers:
         return [], ""
 
-    n = len(kmers)
     print(
-        f"[kmer_hunter] Running bwa mem on {n} k-mer(s) …",
+        f"[kmer_hunter] Running bwa mem on {len(kmers)} k-mer(s) …",
         file=sys.stderr,
     )
 
-    n_batches = (n + batch_size - 1) // batch_size
-    all_hits: list[dict] = []
-    sam_parts: list[str] = []
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
+        query_fa = fh.name
+        for name, seq in kmers:
+            fh.write(f">{name}\n{seq}\n")
 
-    for batch_idx, batch_start in enumerate(range(0, n, batch_size), start=1):
-        batch = kmers[batch_start : batch_start + batch_size]
+    try:
+        result = subprocess.run(
+            [
+                "bwa", "mem",
+                "-a",          # report all alignments, not just the best
+                "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
+                # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
+                # Values like -B 1000 cause integer overflow inside BWA's
+                # internal scoring for repetitive k-mers (e.g. poly-A prefix),
+                # leading BWA to report wrong primary alignments and miss the
+                # actual exact matches.  Exact-match filtering is handled
+                # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
+                "-T", "0",     # min score threshold; we filter by CIGAR + NM
+                ref_path,
+                query_fa,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        os.unlink(query_fa)
 
-        if n_batches > 1:
-            print(
-                f"[kmer_hunter]   batch {batch_idx}/{n_batches}"
-                f" ({len(batch)} k-mer(s)) …",
-                file=sys.stderr,
-            )
+    if result.returncode != 0:
+        msg = (
+            f"[kmer_hunter] ERROR: bwa mem failed"
+            f" (exit {result.returncode}):\n"
+            f"stderr: {result.stderr}"
+        )
+        if result.stdout:
+            msg += f"\nstdout: {result.stdout}"
+        sys.exit(msg)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
-            query_fa = fh.name
-            for name, seq in batch:
-                fh.write(f">{name}\n{seq}\n")
+    sam_text = result.stdout
+    hits = _parse_sam_exact(sam_text, kmer_seqs)
+    print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
 
-        try:
-            result = subprocess.run(
-                [
-                    "bwa", "mem",
-                    "-a",          # report all alignments, not just the best
-                    "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
-                    # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
-                    # Values like -B 1000 cause integer overflow inside BWA's
-                    # internal scoring for repetitive k-mers (e.g. poly-A prefix),
-                    # leading BWA to report wrong primary alignments and miss the
-                    # actual exact matches.  Exact-match filtering is handled
-                    # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
-                    "-T", "0",     # min score threshold; we filter by CIGAR + NM
-                    ref_path,
-                    query_fa,
-                ],
-                capture_output=True,
-                text=True,
-            )
-        finally:
-            os.unlink(query_fa)
-
-        if result.returncode != 0:
-            msg = (
-                f"[kmer_hunter] ERROR: bwa mem failed"
-                f" (exit {result.returncode}):\n"
-                f"stderr: {result.stderr}"
-            )
-            if result.stdout:
-                msg += f"\nstdout: {result.stdout}"
-            sys.exit(msg)
-
-        sam_text = result.stdout
-        all_hits.extend(_parse_sam_exact(sam_text, kmer_seqs))
-
-        if batch_idx == 1:
-            # Keep the full first batch output including SAM headers.
-            sam_parts.append(sam_text)
-        else:
-            # Subsequent batches: skip header lines to avoid duplicates.
-            sam_parts.append(
-                "".join(
-                    line + "\n"
-                    for line in sam_text.splitlines()
-                    if not line.startswith("@")
-                )
-            )
-
-    combined_sam = "".join(sam_parts)
-    print(f"[kmer_hunter] {len(all_hits)} exact hit(s) found", file=sys.stderr)
-
-    return all_hits, combined_sam
+    return hits, sam_text
 
 
 # ─── Exact matching ───────────────────────────────────────────────────────────
@@ -1474,10 +1432,10 @@ def generate_html(
 ) -> None:
     """Combine figures into a single self-contained HTML report.
 
-    Detailed per-hit tables are intentionally omitted from the HTML to keep
-    the report small and responsive.  Full hit listings are written to the
-    companion text files reported in *multi_match_report* and
-    *non_chry_report*.
+    Optional companion-file paths (*alignment_path*, *multi_match_report*,
+    *non_chry_report*) are surfaced in an "Output Files" card so the reader
+    knows where the full hit listings live.  Pass *non_chry_bar* and
+    *non_chry_summary* to enable the whole-genome non-chrY section.
     """
     total_kmers = len(all_kmers)
     total_hits = len(hits_df)
@@ -1509,6 +1467,10 @@ def generate_html(
 
     karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
     region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
+
+    hit_table_html = to_html(
+        build_hit_table(hits_df), full_html=False, include_plotlyjs=False
+    )
 
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
@@ -1751,6 +1713,12 @@ def generate_html(
     <div class="card">
       <h2>Hits per Functional Region</h2>
       {region_bar_html}
+    </div>
+
+    <!-- Hit table -->
+    <div class="card">
+      <h2>Hit Table</h2>
+      {hit_table_html}
     </div>
 {non_chry_section}
 {output_files_section}
