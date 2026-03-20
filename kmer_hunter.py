@@ -361,6 +361,13 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
     - The CIGAR string is exactly ``{kmer_len}M`` (no soft clips, no gaps).
     - The ``NM`` tag equals 0 (zero mismatches / indels).
     """
+    # Pre-compute expected CIGAR strings to avoid repeated f-string formatting.
+    kmer_info: dict[str, tuple[str, str]] = {}
+    for name, seq in kmer_seqs.items():
+        kmer_info[name] = (seq, f"{len(seq)}M")
+
+    NM_EXACT = "NM:i:0"  # noqa: N806 – constant used as fast substring check
+
     hits: list[dict] = []
     for line in sam_text.splitlines():
         if line.startswith("@"):
@@ -368,42 +375,38 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
         fields = line.split("\t")
         if len(fields) < 11:
             continue
-        qname = fields[0]
+
         flag = int(fields[1])
-        chrom = fields[2]
+
+        if flag & 0x804:  # unmapped (4) or supplementary (2048)
+            continue
+
+        qname = fields[0]
+        info = kmer_info.get(qname)
+        if info is None:
+            continue
+        kmer_seq, expected_cigar = info
+
+        if fields[5] != expected_cigar:
+            continue
+
+        # Fast check: look for exact NM:i:0 among the optional fields.
+        if not any(f == NM_EXACT for f in fields[11:]):
+            continue
+
         pos = int(fields[3])  # 1-based in SAM
-        cigar = fields[5]
-
-        if flag & 4:     # unmapped
-            continue
-        if flag & 2048:  # supplementary (split alignment)
-            continue
-
-        kmer_seq = kmer_seqs.get(qname, "")
-        kmer_len = len(kmer_seq)
-
-        # Require a pure full-length match — no soft clips, no indels
-        if cigar != f"{kmer_len}M":
-            continue
-
-        nm = next(
-            (int(f[5:]) for f in fields[11:] if f.startswith("NM:i:")), None
-        )
-        if nm != 0:
-            continue
-
         strand = "-" if (flag & 16) else "+"
-        start = pos
+        kmer_len = len(kmer_seq)
         end = pos + kmer_len - 1
         hits.append(
             {
                 "kmer": qname,
                 "seq": kmer_seq,
-                "chrom": chrom,
-                "start": start,
+                "chrom": fields[2],
+                "start": pos,
                 "end": end,
                 "strand": strand,
-                "region": annotate_region(chrom, start),
+                "region": annotate_region(fields[2], pos),
             }
         )
     return hits
@@ -761,16 +764,32 @@ def write_multi_match_report(hits_df: pd.DataFrame, output_stem: str) -> str | N
         "",
     ]
 
-    for kmer in sorted(multi_kmers):
-        kmer_hits = hits_df[hits_df["kmer"] == kmer].sort_values(["chrom", "start"])
-        seq = kmer_hits.iloc[0]["seq"]
-        total = len(kmer_hits)
-        lines.append(f"{kmer}\t{seq}\t{total}")
-        for _, hit in kmer_hits.iterrows():
-            lines.append(
-                f"  {hit['chrom']}:{hit['start']}-{hit['end']}"
-                f" ({hit['strand']}) [{hit['region']}]"
-            )
+    multi_set = set(multi_kmers)
+    multi_df = (
+        hits_df[hits_df["kmer"].isin(multi_set)]
+        .sort_values(["kmer", "chrom", "start"])
+    )
+
+    # Build all detail lines vectorised across the entire multi_df at once.
+    detail_series = (
+        "  " + multi_df["chrom"].astype(str) + ":"
+        + multi_df["start"].astype(str) + "-"
+        + multi_df["end"].astype(str)
+        + " (" + multi_df["strand"].astype(str) + ")"
+        + " [" + multi_df["region"].astype(str) + "]"
+    )
+    multi_df = multi_df.assign(_detail=detail_series.values)
+
+    # Extract first-seq-per-kmer and counts via a single groupby.
+    agg = multi_df.groupby("kmer", sort=True).agg(
+        seq=("seq", "first"),
+        total=("kmer", "size"),
+        details=("_detail", list),
+    )
+
+    for kmer, row in agg.iterrows():
+        lines.append(f"{kmer}\t{row['seq']}\t{row['total']}")
+        lines.extend(row["details"])
         lines.append("")
 
     Path(path).write_text("\n".join(lines), encoding="utf-8")
@@ -805,11 +824,14 @@ def write_non_chry_report(hits_df: pd.DataFrame, output_stem: str) -> str | None
         "# Columns: kmer<TAB>chrom<TAB>start<TAB>end<TAB>strand<TAB>seq",
         "",
     ]
-    for _, row in display.iterrows():
-        lines.append(
-            f"{row['kmer']}\t{row['chrom']}\t{row['start']}\t"
-            f"{row['end']}\t{row['strand']}\t{row['seq']}"
-        )
+    lines.extend(
+        display["kmer"].astype(str) + "\t"
+        + display["chrom"].astype(str) + "\t"
+        + display["start"].astype(str) + "\t"
+        + display["end"].astype(str) + "\t"
+        + display["strand"].astype(str) + "\t"
+        + display["seq"].astype(str)
+    )
 
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     print(f"[kmer_hunter] Non-chrY kmer report written → {path}", file=sys.stderr)
@@ -925,29 +947,38 @@ def build_karyogram(
     if not chry_intervals.empty:
         midpoints = (chry_intervals["start"] + chry_intervals["end"]) / 2
         widths = (chry_intervals["end"] - chry_intervals["start"]).clip(lower=1).tolist()
+
+        is_cluster = (
+            chry_intervals["cluster"]
+            if "cluster" in chry_intervals.columns
+            else pd.Series(False, index=chry_intervals.index)
+        )
+
         bar_colors = [
-            "#c0392b" if row.get("cluster", False) else "#e74c3c"
-            for _, row in chry_intervals.iterrows()
+            "#c0392b" if c else "#e74c3c" for c in is_cluster
         ]
         bar_line_colors = [
-            "#7b241c" if row.get("cluster", False) else "rgba(0,0,0,0)"
-            for _, row in chry_intervals.iterrows()
+            "#7b241c" if c else "rgba(0,0,0,0)" for c in is_cluster
         ]
-        bar_line_widths = [
-            1.5 if row.get("cluster", False) else 0
-            for _, row in chry_intervals.iterrows()
-        ]
+        bar_line_widths = [1.5 if c else 0 for c in is_cluster]
 
+        starts = chry_intervals["start"]
+        ends = chry_intervals["end"]
+        unique_counts = chry_intervals["unique_count"].astype(int)
+        counts = chry_intervals["count"].astype(int)
+        regions = chry_intervals["region"]
         hover_texts = [
             (
                 f"<b>Interval</b><br>"
-                f"chrY:{row['start']:,}–{row['end']:,}<br>"
-                f"Unique Hits: {int(row['unique_count'])}<br>"
-                f"Total Hits: {int(row['count'])}<br>"
-                f"Region: {row['region']}<br>"
-                f"{'🔴 <b>Cluster</b>' if row.get('cluster', False) else ''}"
+                f"chrY:{s:,}–{e:,}<br>"
+                f"Unique Hits: {uc}<br>"
+                f"Total Hits: {tc}<br>"
+                f"Region: {rg}<br>"
+                f"{'🔴 <b>Cluster</b>' if cl else ''}"
             )
-            for _, row in chry_intervals.iterrows()
+            for s, e, uc, tc, rg, cl in zip(
+                starts, ends, unique_counts, counts, regions, is_cluster
+            )
         ]
 
         # Trace: Unique Hits Only bars (default visible)
@@ -1055,13 +1086,16 @@ def build_karyogram(
         midpoints = (chry_hits["start"] + chry_hits["end"]) / 2
         hover_texts = [
             (
-                f"<b>{row['kmer']}</b><br>"
-                f"Position: chrY:{row['start']:,}–{row['end']:,}<br>"
-                f"Strand: {row['strand']}<br>"
-                f"Region: {row['region']}<br>"
-                f"Sequence: <code>{row['seq']}</code>"
+                f"<b>{k}</b><br>"
+                f"Position: chrY:{s:,}–{e:,}<br>"
+                f"Strand: {st}<br>"
+                f"Region: {rg}<br>"
+                f"Sequence: <code>{sq}</code>"
             )
-            for _, row in chry_hits.iterrows()
+            for k, s, e, st, rg, sq in zip(
+                chry_hits["kmer"], chry_hits["start"], chry_hits["end"],
+                chry_hits["strand"], chry_hits["region"], chry_hits["seq"],
+            )
         ]
         fig.add_trace(
             go.Scatter(
@@ -1622,12 +1656,6 @@ def main() -> None:
     print("[kmer_hunter] Searching for exact matches via BWA …", file=sys.stderr)
     hits, sam_text = bwa_find_exact_matches(kmers, ref_path)
 
-    # 3a. Save alignment file if requested (capture the actual written path)
-    requested_alignment_path = getattr(args, "output_bam", None)
-    actual_alignment_path: str | None = None
-    if requested_alignment_path:
-        actual_alignment_path = save_alignment_file(sam_text, requested_alignment_path)
-
     all_hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
     )
@@ -1638,6 +1666,12 @@ def main() -> None:
 
     # 5. Derive output stem for companion text files
     output_stem = str(Path(args.output).with_suffix(""))
+
+    # 5a. Always save the alignment file; honour --output-bam if given,
+    #     otherwise default to <output_stem>.sam so the SAM is never lost.
+    requested_alignment_path = getattr(args, "output_bam", None)
+    alignment_dest = requested_alignment_path or f"{output_stem}.sam"
+    actual_alignment_path = save_alignment_file(sam_text, alignment_dest)
 
     # 5a. Write text report for kmers with more than one match
     multi_match_report = write_multi_match_report(all_hits_df, output_stem)

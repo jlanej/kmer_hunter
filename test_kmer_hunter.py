@@ -1467,6 +1467,94 @@ class TestGenerateHtml(unittest.TestCase):
         self.assertIn("/tmp/multi.txt", content)
 
 
+# ── Performance regression tests ──────────────────────────────────────────────
+
+
+class TestBuildKaryogramPerformance(unittest.TestCase):
+    """Ensure vectorized karyogram helpers handle large interval sets quickly."""
+
+    def _make_intervals(self, n):
+        return pd.DataFrame({
+            "chrom": ["chrY"] * n,
+            "start": [i * 2000 for i in range(n)],
+            "end": [i * 2000 + 500 for i in range(n)],
+            "count": [3] * n,
+            "unique_count": [2] * n,
+            "region": ["Ampliconic"] * n,
+            "cluster": [i % 5 == 0 for i in range(n)],
+        })
+
+    def _make_hits(self, n):
+        return pd.DataFrame({
+            "kmer": [f"k{i}" for i in range(n)],
+            "seq": ["ACGTACGT"] * n,
+            "chrom": ["chrY"] * n,
+            "start": [i * 2000 for i in range(n)],
+            "end": [i * 2000 + 7 for i in range(n)],
+            "strand": ["+"] * n,
+            "region": ["Ampliconic"] * n,
+        })
+
+    def test_karyogram_large_intervals(self):
+        """build_karyogram should handle 5 000 intervals without iterrows."""
+        n = 5_000
+        hits_df = self._make_hits(n)
+        intervals_df = self._make_intervals(n)
+        import time
+        t0 = time.perf_counter()
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        elapsed = time.perf_counter() - t0
+        self.assertIsNotNone(fig)
+        # Should complete well under 5 seconds with vectorized code.
+        self.assertLess(elapsed, 5.0, f"build_karyogram took {elapsed:.1f}s for {n} intervals")
+
+
+class TestWriteMultiMatchReportPerformance(unittest.TestCase):
+    """Ensure vectorized report writing handles large hit sets quickly."""
+
+    def test_large_multi_match_report(self):
+        n_kmers = 1_000
+        hits_per_kmer = 5
+        rows = []
+        for i in range(n_kmers):
+            for j in range(hits_per_kmer):
+                rows.append({
+                    "kmer": f"kmer_{i}", "seq": "ACGTACGT",
+                    "chrom": "chrY", "start": i * 10000 + j * 100,
+                    "end": i * 10000 + j * 100 + 7,
+                    "strand": "+", "region": "Ampliconic",
+                })
+        df = pd.DataFrame(rows)
+
+        import time, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            stem = str(Path(tmp) / "perf_report")
+            t0 = time.perf_counter()
+            path = kh.write_multi_match_report(df, stem)
+            elapsed = time.perf_counter() - t0
+            self.assertIsNotNone(path)
+            self.assertLess(elapsed, 5.0, f"write_multi_match_report took {elapsed:.1f}s")
+
+
+class TestAlignmentAlwaysSaved(unittest.TestCase):
+    """Ensure alignment file is always saved and reported in HTML."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_alignment_path_used_when_no_output_bam(self):
+        """When --output-bam is not given, alignment is saved to <stem>.sam."""
+        sam_text = "@HD\tVN:1.6\n"
+        dest = str(self.tmpdir / "report.sam")
+        result = kh.save_alignment_file(sam_text, dest)
+        self.assertTrue(Path(result).exists())
+        self.assertTrue(result.endswith(".sam"))
+
+
 
 if __name__ == '__main__':
     unittest.main()
