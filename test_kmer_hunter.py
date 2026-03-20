@@ -596,14 +596,99 @@ class TestBwaFindExactMatches(unittest.TestCase):
         ref.write_text(">chrY\nACGT\n")
         Path(str(ref) + ".bwt").write_text("")
 
-        mock_mem = MagicMock()
-        mock_mem.returncode = 0
-        mock_mem.stdout = "@HD\tVN:1.6\n"
-
-        with patch("subprocess.run", return_value=mock_mem):
+        with patch("subprocess.run", return_value=MagicMock()) as mock_run:
             hits, _sam = kh.bwa_find_exact_matches([], str(ref))
 
         self.assertEqual(hits, [])
+        # bwa mem must NOT be called for an empty k-mer list
+        mock_run.assert_not_called()
+
+    def test_batching_calls_bwa_mem_multiple_times(self):
+        """When k-mers exceed batch_size, multiple bwa mem calls are made."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        sam1 = (
+            "@HD\tVN:1.6\n"
+            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        sam2 = (
+            "@HD\tVN:1.6\n"
+            "k2\t0\tchrY\t2\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        mock1 = MagicMock(returncode=0, stdout=sam1)
+        mock2 = MagicMock(returncode=0, stdout=sam2)
+
+        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
+        with patch("subprocess.run", side_effect=[mock1, mock2]) as mock_run:
+            hits, sam_text = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
+
+        # One bwa mem call per batch
+        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(len(hits), 2)
+        # SAM headers should appear only once in the combined output
+        self.assertEqual(sam_text.count("@HD"), 1)
+
+    def test_batching_combines_hits_from_all_batches(self):
+        """Hits from all batches are combined into the final result list."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        sam1 = (
+            "@HD\tVN:1.6\n"
+            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        sam2 = (
+            "@HD\tVN:1.6\n"
+            "k2\t0\tchrY\t2\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        mock1 = MagicMock(returncode=0, stdout=sam1)
+        mock2 = MagicMock(returncode=0, stdout=sam2)
+
+        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
+        with patch("subprocess.run", side_effect=[mock1, mock2]):
+            hits, _ = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
+
+        kmer_names = {h["kmer"] for h in hits}
+        self.assertIn("k1", kmer_names)
+        self.assertIn("k2", kmer_names)
+
+    def test_single_batch_when_kmers_within_batch_size(self):
+        """When k-mers fit within batch_size, only one bwa mem call is made."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        sam = (
+            "@HD\tVN:1.6\n"
+            "k1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        )
+        mock_mem = MagicMock(returncode=0, stdout=sam)
+
+        kmers = [("k1", "ACGTACGTAC")]
+        with patch("subprocess.run", return_value=mock_mem) as mock_run:
+            hits, _ = kh.bwa_find_exact_matches(kmers, str(ref), batch_size=100)
+
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(len(hits), 1)
+
+    def test_batch_failure_exits_with_error(self):
+        """A bwa mem failure in any batch triggers SystemExit with the exit code."""
+        ref = self.tmpdir / "ref.fa"
+        ref.write_text(">chrY\nACGTACGTAC\n")
+        Path(str(ref) + ".bwt").write_text("")  # skip index
+
+        mock_ok = MagicMock(returncode=0, stdout="@HD\tVN:1.6\n")
+        mock_fail = MagicMock(returncode=-9, stderr="Killed", stdout="")
+
+        kmers = [("k1", "ACGTACGTAC"), ("k2", "ACGTACGTAC")]
+        with patch("subprocess.run", side_effect=[mock_ok, mock_fail]):
+            with self.assertRaises(SystemExit) as cm:
+                kh.bwa_find_exact_matches(kmers, str(ref), batch_size=1)
+
+        self.assertIn("-9", str(cm.exception.code))
 
 
 # ── Poly-A kmer integration tests ─────────────────────────────────────────────
@@ -1187,6 +1272,25 @@ class TestSaveAlignmentFile(unittest.TestCase):
         # Without samtools, should fall back to SAM
         self.assertTrue(result.endswith(".sam"))
         self.assertTrue(Path(result).exists())
+
+    def test_bam_with_samtools_produces_sorted_bam(self):
+        """When samtools is available and path ends in .bam, a sorted BAM is written."""
+        sam_text = "@HD\tVN:1.6\nk1\t0\tchrY\t1\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\tNM:i:0\n"
+        out = self.tmpdir / "output.bam"
+
+        # Simulate the three samtools calls: view (SAM→BAM), sort, index
+        mock_view = MagicMock(returncode=0, stdout=b"FAKE_BAM_BYTES")
+        mock_sort = MagicMock(returncode=0)
+        mock_index = MagicMock(returncode=0)
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/samtools"),
+            patch("subprocess.run", side_effect=[mock_view, mock_sort, mock_index]),
+        ):
+            result = kh.save_alignment_file(sam_text, str(out))
+
+        self.assertEqual(result, str(out))
+        self.assertTrue(result.endswith(".bam"))
 
 
 # ── build_karyogram with intervals ────────────────────────────────────────────

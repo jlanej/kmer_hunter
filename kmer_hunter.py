@@ -159,10 +159,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "Write a BAM (or SAM) alignment file with all BWA hits. "
-            "If the path ends in .bam and samtools is available, a "
-            "coordinate-sorted BAM with index is produced; otherwise "
-            "a SAM file is written."
+            "Override the default alignment output path. "
+            "By default a coordinate-sorted, indexed BAM is written to "
+            "<output_stem>.bam when samtools is available, or a plain SAM "
+            "otherwise. Use this flag to specify a custom path; if the path "
+            "ends in .bam and samtools is present a sorted BAM with index is "
+            "produced, otherwise a SAM file is written."
         ),
     )
     return parser.parse_args()
@@ -330,6 +332,11 @@ def read_fasta(path: str) -> dict[str, str]:
 
 # ─── BWA-based exact matching ─────────────────────────────────────────────────
 
+# Maximum number of k-mers per bwa mem invocation.  Submitting millions of
+# sequences in a single call exhausts BWA's internal memory and triggers an
+# OOM kill (exit -9).  Batching keeps peak resident memory manageable.
+BWA_BATCH_SIZE = 50_000
+
 
 def ensure_bwa_index(ref_path: str) -> None:
     """Build a BWA index for *ref_path* unless one already exists.
@@ -415,54 +422,82 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
 def bwa_find_exact_matches(
     kmers: list[tuple[str, str]],
     ref_path: str,
+    batch_size: int = BWA_BATCH_SIZE,
 ) -> tuple[list[dict], str]:
     """Find all exact k-mer matches using BWA mem.
 
     This is orders of magnitude faster than Python string search for large
-    k-mer sets.  BWA mem is invoked once for the entire k-mer collection with
-    settings that strongly penalise mismatches, gaps, and soft-clipping so
-    that only perfect full-length alignments score above the reporting
-    threshold.  The SAM output is then filtered through ``_parse_sam_exact``
-    for additional correctness.
+    k-mer sets.  BWA mem is invoked with settings that strongly penalise
+    mismatches, gaps, and soft-clipping so that only perfect full-length
+    alignments score above the reporting threshold.  The SAM output is then
+    filtered through ``_parse_sam_exact`` for additional correctness.
+
+    Large k-mer sets are automatically split into batches of *batch_size*
+    k-mers.  Each batch is written to a temporary FASTA file and submitted to
+    a separate ``bwa mem`` invocation.  Results are merged before returning.
+    This prevents OOM kills when searching millions of k-mers at once.
 
     The BWA index is built automatically (see :func:`ensure_bwa_index`) unless
     it already exists alongside *ref_path*.
 
-    Returns ``(hits, sam_text)`` where *sam_text* is the raw SAM output from
-    BWA.  Call :func:`save_alignment_file` separately if you need to persist
-    the alignments.
+    Returns ``(hits, sam_text)`` where *sam_text* is the concatenated raw SAM
+    output from all BWA batches (SAM headers kept from the first batch only).
+    Call :func:`save_alignment_file` separately if you need to persist the
+    alignments.
     """
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
-        query_fa = fh.name
-        for name, seq in kmers:
-            fh.write(f">{name}\n{seq}\n")
+    if not kmers:
+        return [], ""
 
-    try:
-        print(
-            f"[kmer_hunter] Running bwa mem on {len(kmers)} k-mer(s) …",
-            file=sys.stderr,
-        )
-        result = subprocess.run(
-            [
-                "bwa", "mem",
-                "-a",          # report all alignments, not just the best
-                "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
-                # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
-                # Values like -B 1000 cause integer overflow inside BWA's
-                # internal scoring for repetitive k-mers (e.g. poly-A prefix),
-                # leading BWA to report wrong primary alignments and miss the
-                # actual exact matches.  Exact-match filtering is handled
-                # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
-                "-T", "0",     # min score threshold; we filter by CIGAR + NM
-                ref_path,
-                query_fa,
-            ],
-            capture_output=True,
-            text=True,
-        )
+    n = len(kmers)
+    print(
+        f"[kmer_hunter] Running bwa mem on {n} k-mer(s) …",
+        file=sys.stderr,
+    )
+
+    n_batches = (n + batch_size - 1) // batch_size
+    all_hits: list[dict] = []
+    sam_parts: list[str] = []
+
+    for batch_idx, batch_start in enumerate(range(0, n, batch_size), start=1):
+        batch = kmers[batch_start : batch_start + batch_size]
+
+        if n_batches > 1:
+            print(
+                f"[kmer_hunter]   batch {batch_idx}/{n_batches}"
+                f" ({len(batch)} k-mer(s)) …",
+                file=sys.stderr,
+            )
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".fa", delete=False) as fh:
+            query_fa = fh.name
+            for name, seq in batch:
+                fh.write(f">{name}\n{seq}\n")
+
+        try:
+            result = subprocess.run(
+                [
+                    "bwa", "mem",
+                    "-a",          # report all alignments, not just the best
+                    "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
+                    # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
+                    # Values like -B 1000 cause integer overflow inside BWA's
+                    # internal scoring for repetitive k-mers (e.g. poly-A prefix),
+                    # leading BWA to report wrong primary alignments and miss the
+                    # actual exact matches.  Exact-match filtering is handled
+                    # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
+                    "-T", "0",     # min score threshold; we filter by CIGAR + NM
+                    ref_path,
+                    query_fa,
+                ],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            os.unlink(query_fa)
+
         if result.returncode != 0:
             msg = (
                 f"[kmer_hunter] ERROR: bwa mem failed"
@@ -472,13 +507,27 @@ def bwa_find_exact_matches(
             if result.stdout:
                 msg += f"\nstdout: {result.stdout}"
             sys.exit(msg)
-        sam_text = result.stdout
-        hits = _parse_sam_exact(sam_text, kmer_seqs)
-        print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
 
-        return hits, sam_text
-    finally:
-        os.unlink(query_fa)
+        sam_text = result.stdout
+        all_hits.extend(_parse_sam_exact(sam_text, kmer_seqs))
+
+        if batch_idx == 1:
+            # Keep the full first batch output including SAM headers.
+            sam_parts.append(sam_text)
+        else:
+            # Subsequent batches: skip header lines to avoid duplicates.
+            sam_parts.append(
+                "".join(
+                    line + "\n"
+                    for line in sam_text.splitlines()
+                    if not line.startswith("@")
+                )
+            )
+
+    combined_sam = "".join(sam_parts)
+    print(f"[kmer_hunter] {len(all_hits)} exact hit(s) found", file=sys.stderr)
+
+    return all_hits, combined_sam
 
 
 # ─── Exact matching ───────────────────────────────────────────────────────────
@@ -702,9 +751,13 @@ def build_non_chry_summary(hits_df: pd.DataFrame) -> go.Figure:
 def save_alignment_file(sam_text: str, output_path: str) -> str:
     """Write filtered SAM and optionally convert to sorted BAM.
 
-    If *samtools* is available the SAM is converted to a coordinate-sorted BAM
-    with index.  Otherwise the SAM is saved as-is.  Returns the path of the
-    file actually written.
+    When *output_path* ends in ``.bam`` and *samtools* is available the SAM is
+    converted to a coordinate-sorted, indexed BAM.  Otherwise the SAM is saved
+    as-is (with a ``.sam`` extension appended if no recognised extension is
+    present).  Returns the path of the file actually written.
+
+    By default kmer_hunter writes a sorted BAM to ``<output_stem>.bam``.  Use
+    ``--output-bam`` to override the destination path.
     """
     sam_path = output_path
     if not sam_path.endswith(".sam") and not sam_path.endswith(".bam"):
@@ -1748,9 +1801,10 @@ def main() -> None:
     output_stem = str(Path(args.output).with_suffix(""))
 
     # 5a. Always save the alignment file; honour --output-bam if given,
-    #     otherwise default to <output_stem>.sam so the SAM is never lost.
+    #     otherwise default to <output_stem>.bam (sorted, indexed BAM when
+    #     samtools is available; plain SAM otherwise).
     requested_alignment_path = getattr(args, "output_bam", None)
-    alignment_dest = requested_alignment_path or f"{output_stem}.sam"
+    alignment_dest = requested_alignment_path or f"{output_stem}.bam"
     actual_alignment_path = save_alignment_file(sam_text, alignment_dest)
 
     # 5b. Write text report for kmers with more than one match
