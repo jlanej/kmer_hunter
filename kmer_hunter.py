@@ -413,7 +413,7 @@ def _parse_sam_exact(sam_text: str, kmer_seqs: dict[str, str]) -> list[dict]:
 def bwa_find_exact_matches(
     kmers: list[tuple[str, str]],
     ref_path: str,
-    sam_path: str | None = None,
+    alignment_path: str | None = None,
 ) -> tuple[list[dict], str]:
     """Find all exact k-mer matches using BWA mem.
 
@@ -428,9 +428,8 @@ def bwa_find_exact_matches(
     it already exists alongside *ref_path*.
 
     Returns ``(hits, sam_text)`` where *sam_text* is the raw SAM output from
-    BWA.  If *sam_path* is given, the filtered exact-match SAM is saved there
-    (or converted to BAM when samtools is available and the path ends in
-    ``.bam``).
+    BWA.  If *alignment_path* is given, the SAM is saved there (or converted
+    to a sorted BAM when samtools is available and the path ends in ``.bam``).
     """
     ensure_bwa_index(ref_path)
     kmer_seqs: dict[str, str] = dict(kmers)
@@ -469,8 +468,8 @@ def bwa_find_exact_matches(
         hits = _parse_sam_exact(sam_text, kmer_seqs)
         print(f"[kmer_hunter] {len(hits)} exact hit(s) found", file=sys.stderr)
 
-        if sam_path:
-            save_alignment_file(sam_text, sam_path)
+        if alignment_path:
+            save_alignment_file(sam_text, alignment_path)
 
         return hits, sam_text
     finally:
@@ -684,9 +683,8 @@ def save_alignment_file(sam_text: str, output_path: str) -> str:
             # Convert SAM → unsorted BAM
             p1 = subprocess.run(
                 ["samtools", "view", "-bS", "-"],
-                input=sam_text,
+                input=sam_text.encode("utf-8"),
                 capture_output=True,
-                text=False,
             )
             if p1.returncode != 0:
                 raise RuntimeError(p1.stderr.decode())
@@ -1415,8 +1413,8 @@ def main() -> None:
 
     # 3. Search using BWA mem (exact matches, all chromosomes in one pass)
     print("[kmer_hunter] Searching for exact matches via BWA …", file=sys.stderr)
-    sam_path = getattr(args, "output_bam", None)
-    hits, _sam_text = bwa_find_exact_matches(kmers, ref_path, sam_path=sam_path)
+    alignment_path = getattr(args, "output_bam", None)
+    hits, _sam_text = bwa_find_exact_matches(kmers, ref_path, alignment_path=alignment_path)
 
     all_hits_df = pd.DataFrame(hits) if hits else pd.DataFrame(
         columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"]
@@ -1456,7 +1454,7 @@ def main() -> None:
         non_chry_table=non_chry_table,
         non_chry_summary=non_chry_summary,
         intervals_df=intervals_df,
-        alignment_path=sam_path,
+        alignment_path=alignment_path,
     )
     print("[kmer_hunter] Done!", file=sys.stderr)
 
