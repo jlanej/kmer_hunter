@@ -1673,10 +1673,10 @@ def main() -> None:
     alignment_dest = requested_alignment_path or f"{output_stem}.sam"
     actual_alignment_path = save_alignment_file(sam_text, alignment_dest)
 
-    # 5a. Write text report for kmers with more than one match
+    # 5b. Write text report for kmers with more than one match
     multi_match_report = write_multi_match_report(all_hits_df, output_stem)
 
-    # 5b. Write text report for non-chrY kmer hits
+    # 5c. Write text report for non-chrY kmer hits
     non_chry_report_path = write_non_chry_report(all_hits_df, output_stem)
 
     # 6. Split hits for chrY-specific and non-chrY visualisations

@@ -6,6 +6,7 @@ All tests run offline — no network access or real reference downloads required
 import gzip
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
@@ -1500,7 +1501,6 @@ class TestBuildKaryogramPerformance(unittest.TestCase):
         n = 5_000
         hits_df = self._make_hits(n)
         intervals_df = self._make_intervals(n)
-        import time
         t0 = time.perf_counter()
         fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
         elapsed = time.perf_counter() - t0
@@ -1526,7 +1526,6 @@ class TestWriteMultiMatchReportPerformance(unittest.TestCase):
                 })
         df = pd.DataFrame(rows)
 
-        import time, tempfile
         with tempfile.TemporaryDirectory() as tmp:
             stem = str(Path(tmp) / "perf_report")
             t0 = time.perf_counter()
