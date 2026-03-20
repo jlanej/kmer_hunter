@@ -553,10 +553,21 @@ def collapse_to_intervals(
 
     Hits whose start positions are within *gap* bp of the previous hit's end
     are merged into a single interval.  Returns a DataFrame with columns:
-    ``chrom``, ``start``, ``end``, ``count``, ``region``.
+    ``chrom``, ``start``, ``end``, ``count``, ``unique_count``, ``region``.
+
+    ``count`` is the total number of hits in the interval.
+    ``unique_count`` counts only hits from k-mers that appear exactly once
+    across the entire hit set (unique k-mers), providing a measure of
+    interval enrichment that is not inflated by repetitive sequences.
     """
     if hits_df.empty:
-        return pd.DataFrame(columns=["chrom", "start", "end", "count", "region"])
+        return pd.DataFrame(
+            columns=["chrom", "start", "end", "count", "unique_count", "region"]
+        )
+
+    # Identify k-mers that appear exactly once across all hits (unique k-mers).
+    kmer_hit_counts = hits_df.groupby("kmer").size()
+    unique_kmers: set[str] = set(kmer_hit_counts[kmer_hit_counts == 1].index)
 
     intervals: list[dict] = []
     sorted_df = hits_df.sort_values(["chrom", "start"]).reset_index(drop=True)
@@ -568,12 +579,15 @@ def collapse_to_intervals(
             "start": rows[0]["start"],
             "end": rows[0]["end"],
             "count": 1,
+            "unique_count": 1 if rows[0]["kmer"] in unique_kmers else 0,
             "region": rows[0]["region"],
         }
         for row in rows[1:]:
             if row["start"] <= cur["end"] + gap:
                 cur["end"] = max(cur["end"], row["end"])
                 cur["count"] += 1
+                if row["kmer"] in unique_kmers:
+                    cur["unique_count"] += 1
             else:
                 intervals.append(cur)
                 cur = {
@@ -581,6 +595,7 @@ def collapse_to_intervals(
                     "start": row["start"],
                     "end": row["end"],
                     "count": 1,
+                    "unique_count": 1 if row["kmer"] in unique_kmers else 0,
                     "region": row["region"],
                 }
         intervals.append(cur)
@@ -814,19 +829,37 @@ def build_karyogram(
     making clusters and regions with many matches immediately visible.
     Cluster intervals (``cluster == True``) are highlighted in a darker red.
 
+    Two views are available via toggle buttons:
+
+    * **Unique Hits Only** (default) — bars reflect ``unique_count``, counting
+      only hits from k-mers that appear exactly once genome-wide.  This removes
+      inflation from repetitive or multi-mapping sequences.
+    * **All Hits** — bars reflect the total ``count`` of every hit in the
+      interval, including hits from k-mers with multiple genome-wide matches.
+
     When *intervals_df* is ``None`` or empty but per-hit data is available,
-    individual hit markers are shown at y = 1 as a fallback.
+    individual hit markers are shown at y = 1 as a fallback (no toggle).
     """
     fig = go.Figure()
 
-    # Determine the y-axis ceiling from the interval data
+    # Determine the y-axis ceilings from the interval data
     if intervals_df is not None and not intervals_df.empty:
         chry_intervals = intervals_df[intervals_df["chrom"] == "chrY"].copy()
     else:
         chry_intervals = pd.DataFrame()
 
-    max_count = int(chry_intervals["count"].max()) if not chry_intervals.empty else 1
-    y_max = max(max_count * 1.10, 2)  # at least 2 for a chart with minimal data
+    # Backward-compat: if unique_count column is absent, fall back to count.
+    if not chry_intervals.empty and "unique_count" not in chry_intervals.columns:
+        chry_intervals["unique_count"] = chry_intervals["count"]
+
+    total_max = int(chry_intervals["count"].max()) if not chry_intervals.empty else 1
+    unique_max = (
+        int(chry_intervals["unique_count"].max()) if not chry_intervals.empty else 1
+    )
+    y_max_all = max(total_max * 1.10, 2)      # ceiling for "All Hits" view
+    y_max_unique = max(unique_max * 1.10, 2)  # ceiling for "Unique Hits Only" view
+    # Shapes use the larger ceiling so they cover both views without clipping.
+    y_max = y_max_all
 
     # ── Background: functional region colour bands ────────────────────────
     for region in CHRY_REGIONS:
@@ -841,12 +874,14 @@ def build_karyogram(
             line=dict(width=0),
             layer="below",
         )
-        # Label wide regions near the top
+        # Label wide regions; use paper-space y so labels stay visible when
+        # the y-axis range changes via the toggle.
         width = region["end"] - region["start"]
         if width > 1_500_000:
             fig.add_annotation(
                 x=(region["start"] + region["end"]) / 2,
-                y=y_max * 0.97,
+                y=0.97,
+                yref="paper",
                 text=f'<b>{region["name"]}</b>',
                 showarrow=False,
                 font=dict(size=9, color="#2c3e50"),
@@ -888,50 +923,76 @@ def build_karyogram(
 
     # ── Hit-count bars for each collapsed interval ────────────────────────
     if not chry_intervals.empty:
-        for _, row in chry_intervals.iterrows():
-            is_cluster = bool(row.get("cluster", False))
-            fill_color = "#c0392b" if is_cluster else "#e74c3c"
-            line_cfg = (
-                dict(color="#7b241c", width=1.5) if is_cluster else dict(width=0)
-            )
-            fig.add_shape(
-                type="rect",
-                x0=row["start"],
-                x1=max(row["end"], row["start"] + 1),  # always at least 1 px wide
-                y0=0,
-                y1=row["count"],
-                fillcolor=fill_color,
-                opacity=0.75,
-                line=line_cfg,
-            )
-
-        # Transparent hover markers positioned at the top of each bar
         midpoints = (chry_intervals["start"] + chry_intervals["end"]) / 2
+        widths = (chry_intervals["end"] - chry_intervals["start"]).clip(lower=1).tolist()
+        bar_colors = [
+            "#c0392b" if row.get("cluster", False) else "#e74c3c"
+            for _, row in chry_intervals.iterrows()
+        ]
+        bar_line_colors = [
+            "#7b241c" if row.get("cluster", False) else "rgba(0,0,0,0)"
+            for _, row in chry_intervals.iterrows()
+        ]
+        bar_line_widths = [
+            1.5 if row.get("cluster", False) else 0
+            for _, row in chry_intervals.iterrows()
+        ]
+
         hover_texts = [
             (
                 f"<b>Interval</b><br>"
                 f"chrY:{row['start']:,}–{row['end']:,}<br>"
-                f"Hits: {row['count']}<br>"
+                f"Unique Hits: {int(row['unique_count'])}<br>"
+                f"Total Hits: {int(row['count'])}<br>"
                 f"Region: {row['region']}<br>"
                 f"{'🔴 <b>Cluster</b>' if row.get('cluster', False) else ''}"
             )
             for _, row in chry_intervals.iterrows()
         ]
+
+        # Trace: Unique Hits Only bars (default visible)
         fig.add_trace(
-            go.Scatter(
+            go.Bar(
                 x=midpoints.tolist(),
-                y=chry_intervals["count"].tolist(),
-                mode="markers",
-                marker=dict(size=6, color="rgba(0,0,0,0)"),
+                y=chry_intervals["unique_count"].tolist(),
+                width=widths,
+                marker=dict(
+                    color=bar_colors,
+                    opacity=0.75,
+                    line=dict(color=bar_line_colors, width=bar_line_widths),
+                ),
                 text=hover_texts,
                 hovertemplate="%{text}<extra></extra>",
-                name="hit interval",
+                name="unique hit interval",
+                visible=True,
                 showlegend=True,
             )
         )
 
-        # Legend entry for cluster bars
-        if chry_intervals.get("cluster", pd.Series(dtype=bool)).any():
+        # Trace: All Hits bars (initially hidden)
+        fig.add_trace(
+            go.Bar(
+                x=midpoints.tolist(),
+                y=chry_intervals["count"].tolist(),
+                width=widths,
+                marker=dict(
+                    color=bar_colors,
+                    opacity=0.75,
+                    line=dict(color=bar_line_colors, width=bar_line_widths),
+                ),
+                text=hover_texts,
+                hovertemplate="%{text}<extra></extra>",
+                name="hit interval (all)",
+                visible=False,
+                showlegend=True,
+            )
+        )
+
+        # Optional legend entry for cluster bars (always visible when present)
+        has_clusters = bool(
+            chry_intervals.get("cluster", pd.Series(dtype=bool)).any()
+        )
+        if has_clusters:
             fig.add_trace(
                 go.Scatter(
                     x=[None],
@@ -946,6 +1007,48 @@ def build_karyogram(
                     showlegend=True,
                 )
             )
+
+        # ── Toggle buttons: Unique Hits Only ↔ All Hits ───────────────────
+        n_legend = len(CHRY_REGIONS)   # region legend traces (always visible)
+        n_extra = 1 if has_clusters else 0  # cluster legend trace
+        # visible arrays must cover every trace in order
+        visible_unique = [True] * n_legend + [True, False] + [True] * n_extra
+        visible_all = [True] * n_legend + [False, True] + [True] * n_extra
+
+        fig.update_layout(
+            updatemenus=[
+                dict(
+                    type="buttons",
+                    direction="left",
+                    buttons=[
+                        dict(
+                            label="Unique Hits Only",
+                            method="update",
+                            args=[
+                                {"visible": visible_unique},
+                                {"yaxis.range": [0, y_max_unique]},
+                            ],
+                        ),
+                        dict(
+                            label="All Hits",
+                            method="update",
+                            args=[
+                                {"visible": visible_all},
+                                {"yaxis.range": [0, y_max_all]},
+                            ],
+                        ),
+                    ],
+                    active=0,
+                    x=0.0,
+                    xanchor="left",
+                    y=1.15,
+                    yanchor="top",
+                    bgcolor="#ecf0f1",
+                    bordercolor="#bdc3c7",
+                    font=dict(size=11),
+                ),
+            ]
+        )
 
     elif not chry_hits.empty:
         # Fallback: individual markers at y = 1 when no intervals are available
@@ -992,7 +1095,9 @@ def build_karyogram(
         yaxis=dict(
             title="Hit count",
             visible=True,
-            rangemode="tozero",
+            # Start in "Unique Hits Only" range; the toggle buttons update this.
+            # When there are no intervals, y_max_unique == y_max_all == 2.
+            range=[0, y_max_unique],
             showgrid=True,
             gridcolor="#ecf0f1",
         ),

@@ -995,8 +995,48 @@ class TestCollapseToIntervals(unittest.TestCase):
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
         ])
         result = kh.collapse_to_intervals(df)
-        expected = {"chrom", "start", "end", "count", "region"}
+        expected = {"chrom", "start", "end", "count", "unique_count", "region"}
         self.assertEqual(set(result.columns), expected)
+
+    def test_unique_count_single_hit_kmer(self):
+        """A k-mer with exactly one hit should contribute to unique_count."""
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df)
+        self.assertEqual(result.iloc[0]["unique_count"], 1)
+        self.assertEqual(result.iloc[0]["count"], 1)
+
+    def test_unique_count_multi_hit_kmer_excluded(self):
+        """A k-mer with more than one hit should not contribute to unique_count."""
+        df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 500, "end": 510, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=1000)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["count"], 2)
+        self.assertEqual(result.iloc[0]["unique_count"], 0)
+
+    def test_unique_count_mixed_kmers(self):
+        """unique_count counts only hits from k-mers that appear exactly once."""
+        df = pd.DataFrame([
+            # k1 appears once (unique)
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+            # k2 appears twice (non-unique): both hits in the same interval
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chrY", "start": 200, "end": 210, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTGG", "chrom": "chrY", "start": 300, "end": 310, "strand": "+", "region": "PAR1"},
+        ])
+        result = kh.collapse_to_intervals(df, gap=1000)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["count"], 3)
+        self.assertEqual(result.iloc[0]["unique_count"], 1)
+
+    def test_unique_count_empty_dataframe(self):
+        df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
+        result = kh.collapse_to_intervals(df)
+        self.assertEqual(len(result), 0)
+        self.assertIn("unique_count", result.columns)
 
     def test_end_position_uses_max(self):
         """When merging, the end position should be the maximum end of all merged hits."""
@@ -1118,7 +1158,7 @@ class TestBuildKaryogramWithIntervals(unittest.TestCase):
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
         ])
         intervals_df = pd.DataFrame([
-            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "region": "PAR1", "cluster": False},
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "unique_count": 1, "region": "PAR1", "cluster": False},
         ])
         fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
         self.assertIsNotNone(fig)
@@ -1130,7 +1170,7 @@ class TestBuildKaryogramWithIntervals(unittest.TestCase):
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
         ])
         intervals_df = pd.DataFrame([
-            {"chrom": "chrY", "start": 100, "end": 1000, "count": 10, "region": "PAR1", "cluster": True},
+            {"chrom": "chrY", "start": 100, "end": 1000, "count": 10, "unique_count": 5, "region": "PAR1", "cluster": True},
         ])
         fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
         self.assertIsNotNone(fig)
@@ -1156,6 +1196,84 @@ class TestBuildKaryogramWithIntervals(unittest.TestCase):
         hits_df = pd.DataFrame(columns=["kmer", "seq", "chrom", "start", "end", "strand", "region"])
         fig = kh.build_karyogram(hits_df)
         self.assertIn("count", fig.layout.yaxis.title.text.lower())
+
+    def test_karyogram_toggle_buttons_present(self):
+        """Toggle buttons for Unique Hits Only and All Hits must be present."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "unique_count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        self.assertEqual(len(fig.layout.updatemenus), 1)
+        button_labels = [b.label for b in fig.layout.updatemenus[0].buttons]
+        self.assertIn("Unique Hits Only", button_labels)
+        self.assertIn("All Hits", button_labels)
+
+    def test_karyogram_toggle_default_is_unique(self):
+        """The active button (default view) should be Unique Hits Only."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "unique_count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        menu = fig.layout.updatemenus[0]
+        # active=0 means the first button (Unique Hits Only) is selected by default
+        self.assertEqual(menu.active, 0)
+        self.assertEqual(menu.buttons[0].label, "Unique Hits Only")
+
+    def test_karyogram_two_bar_traces_for_intervals(self):
+        """Two Bar traces (unique and all) must be in the figure when intervals present."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "unique_count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        bar_traces = [t for t in fig.data if t.type == "bar"]
+        self.assertEqual(len(bar_traces), 2)
+        names = {t.name for t in bar_traces}
+        self.assertIn("unique hit interval", names)
+        self.assertIn("hit interval (all)", names)
+
+    def test_karyogram_unique_bar_visible_all_bar_hidden_by_default(self):
+        """Unique hits bar is visible; all-hits bar is hidden initially."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "unique_count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        unique_bar = next(t for t in fig.data if t.type == "bar" and t.name == "unique hit interval")
+        all_bar = next(t for t in fig.data if t.type == "bar" and t.name == "hit interval (all)")
+        self.assertTrue(unique_bar.visible)
+        self.assertFalse(all_bar.visible)
+
+    def test_karyogram_backward_compat_no_unique_count(self):
+        """intervals_df without unique_count column should still render without error."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        intervals_df = pd.DataFrame([
+            {"chrom": "chrY", "start": 100, "end": 110, "count": 1, "region": "PAR1", "cluster": False},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=intervals_df)
+        self.assertIsNotNone(fig)
+        bar_traces = [t for t in fig.data if t.type == "bar"]
+        self.assertEqual(len(bar_traces), 2)
+
+    def test_karyogram_no_toggle_buttons_without_intervals(self):
+        """Toggle buttons should not appear in fallback (no intervals) mode."""
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY", "start": 100, "end": 110, "strand": "+", "region": "PAR1"},
+        ])
+        fig = kh.build_karyogram(hits_df, intervals_df=None)
+        self.assertEqual(len(fig.layout.updatemenus), 0)
 
 
 # ── bwa_find_exact_matches returns sam_text ───────────────────────────────────
