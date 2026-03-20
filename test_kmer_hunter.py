@@ -1542,8 +1542,56 @@ class TestGenerateHtml(unittest.TestCase):
         content = Path(out).read_text()
         self.assertIn("/tmp/multi.txt", content)
 
+    def test_summary_stats_card_present_in_html(self):
+        """generate_html() should embed the Summary Statistics card."""
+        hits_df = self._minimal_hits()
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT")], out)
+        content = Path(out).read_text()
+        self.assertIn("Summary Statistics", content)
 
-# ── _chrom_sort_key ────────────────────────────────────────────────────────────
+
+class TestBuildSummaryStatsHtml(unittest.TestCase):
+    """Tests for _build_summary_stats_html()."""
+
+    def _hits(self):
+        # k1: 1 genome-wide hit → unique; k2: 2 hits (chrY PAR1 + chr1) → multi-hit
+        return pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 200, "end": 204, "strand": "+", "region": "PAR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+
+    def test_kmer_category_rows_present(self):
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")])
+        self.assertIn("Total k-mers queried", html)
+        self.assertIn("Unique", html)
+        self.assertIn("Multi-hit", html)
+        self.assertIn("no hit", html)
+
+    def test_unique_kmer_percentage(self):
+        """k1 is unique (1/3 queried = 33.3%)."""
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")])
+        self.assertIn("33.3%", html)
+
+    def test_region_rows_present(self):
+        html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
+        self.assertIn("PAR1", html)
+        self.assertIn("XTR", html)
+
+    def test_empty_hits(self):
+        html = kh._build_summary_stats_html(pd.DataFrame(), [("k1", "ACGT")])
+        self.assertIn("Total k-mers queried", html)
+        # No division errors — percentages show as dash
+        self.assertIn("—", html)
+
+
+
 
 
 class TestChromSortKey(unittest.TestCase):

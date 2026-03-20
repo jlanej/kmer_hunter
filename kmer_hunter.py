@@ -1417,6 +1417,106 @@ def build_hit_table(hits_df: pd.DataFrame) -> go.Figure:
 # ─── HTML report ──────────────────────────────────────────────────────────────
 
 
+def _build_summary_stats_html(
+    hits_df: pd.DataFrame,
+    all_kmers: list[tuple[str, str]],
+) -> str:
+    """Return an HTML string with two summary tables.
+
+    Table 1 — K-mer level:
+      how many k-mers were queried, matched uniquely, multi-hit, or absent.
+
+    Table 2 — chrY region breakdown:
+      for every CHRY_REGION, count of unique hits, multi-hits and total, plus
+      the percentage each category represents of the genome-wide totals.
+    """
+    total_kmers = len(all_kmers)
+
+    def _pct(n: int, d: int) -> str:
+        return f"{100 * n / d:.1f}%" if d > 0 else "—"
+
+    if hits_df.empty:
+        unique_kmer_count = multi_kmer_count = 0
+        total_chry_unique = total_chry_multi = 0
+        region_rows_html = ""
+    else:
+        kmer_hit_counts = hits_df.groupby("kmer").size()
+        unique_kmers = set(kmer_hit_counts[kmer_hit_counts == 1].index)
+        multi_kmers = set(kmer_hit_counts[kmer_hit_counts > 1].index)
+        unique_kmer_count = len(unique_kmers)
+        multi_kmer_count = len(multi_kmers)
+
+        chry_hits = hits_df[hits_df["chrom"] == "chrY"]
+        is_unique = chry_hits["kmer"].isin(unique_kmers)
+        total_chry_unique = int(is_unique.sum())
+        total_chry_multi = int((~is_unique).sum())
+
+        rows: list[str] = []
+        for r in CHRY_REGIONS:
+            region_name = r["name"]
+            color = r["color"]
+            mask = chry_hits["region"] == region_name
+            u = int((mask & is_unique).sum())
+            m = int((mask & ~is_unique).sum())
+            tot = u + m
+            swatch = (
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'border-radius:3px;background:{color};vertical-align:middle;'
+                f'margin-right:6px"></span>'
+            )
+            rows.append(
+                f"<tr>"
+                f"<td>{swatch}{region_name}</td>"
+                f"<td>{u}</td><td>{_pct(u, total_chry_unique)}</td>"
+                f"<td>{m}</td><td>{_pct(m, total_chry_multi)}</td>"
+                f"<td>{tot}</td>"
+                f"</tr>"
+            )
+        region_rows_html = "\n        ".join(rows)
+
+    kmers_with_hits = unique_kmer_count + multi_kmer_count
+    kmers_no_hits = total_kmers - kmers_with_hits
+
+    totals_row = (
+        f"<tr style=\"font-weight:600;border-top:2px solid #bdc3c7\">"
+        f"<td>All chrY regions</td>"
+        f"<td>{total_chry_unique}</td>"
+        f"<td>{'100%' if total_chry_unique > 0 else '—'}</td>"
+        f"<td>{total_chry_multi}</td>"
+        f"<td>{'100%' if total_chry_multi > 0 else '—'}</td>"
+        f"<td>{total_chry_unique + total_chry_multi}</td>"
+        f"</tr>"
+    )
+
+    kmer_table = f"""<table class="files-table">
+      <thead><tr><th>K-mer Category</th><th>Count</th><th>% of Queried</th></tr></thead>
+      <tbody>
+        <tr><td>Total k-mers queried</td><td>{total_kmers}</td><td>100%</td></tr>
+        <tr><td>K-mers with ≥1 hit</td><td>{kmers_with_hits}</td><td>{_pct(kmers_with_hits, total_kmers)}</td></tr>
+        <tr><td>&nbsp;&nbsp;↳ Unique (exactly 1 genome-wide hit)</td><td>{unique_kmer_count}</td><td>{_pct(unique_kmer_count, total_kmers)}</td></tr>
+        <tr><td>&nbsp;&nbsp;↳ Multi-hit (≥2 genome-wide hits)</td><td>{multi_kmer_count}</td><td>{_pct(multi_kmer_count, total_kmers)}</td></tr>
+        <tr><td>K-mers with no hit</td><td>{kmers_no_hits}</td><td>{_pct(kmers_no_hits, total_kmers)}</td></tr>
+      </tbody>
+    </table>"""
+
+    region_table = f"""<table class="files-table" style="margin-top:1.5rem">
+      <thead>
+        <tr>
+          <th>chrY Region</th>
+          <th>Unique Hits</th><th>% of Unique</th>
+          <th>Multi-Hits</th><th>% of Multi</th>
+          <th>Total chrY Hits</th>
+        </tr>
+      </thead>
+      <tbody>
+        {region_rows_html}
+        {totals_row}
+      </tbody>
+    </table>"""
+
+    return kmer_table + "\n" + region_table
+
+
 def generate_html(
     karyogram: go.Figure,
     region_bar: go.Figure,
@@ -1475,6 +1575,7 @@ def generate_html(
 
     karyogram_html = to_html(karyogram, full_html=False, include_plotlyjs=False)
     region_bar_html = to_html(region_bar, full_html=False, include_plotlyjs=False)
+    summary_stats_html = _build_summary_stats_html(hits_df, all_kmers)
 
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
@@ -1704,6 +1805,12 @@ def generate_html(
         <div class="value">{par2_unique}</div>
         <div class="label">PAR2 Unique Hits</div>
       </div>
+    </div>
+
+    <!-- Summary statistics -->
+    <div class="card">
+      <h2>Summary Statistics</h2>
+      {summary_stats_html}
     </div>
 
     <!-- Karyogram -->
