@@ -431,11 +431,12 @@ def bwa_find_exact_matches(
                 "bwa", "mem",
                 "-a",          # report all alignments, not just the best
                 "-k", "11",    # minimum seed length (handles k-mers ≥ 11 bp)
-                "-A", "1",     # match score
-                "-B", "1000",  # mismatch penalty (effectively blocks mismatches)
-                "-O", "1000,1000",  # gap-open penalty
-                "-E", "1000,1000",  # gap-extend penalty
-                "-L", "100,100",    # clip penalty (discourages soft-clipping)
+                # NOTE: do NOT pass extreme mismatch/gap/clip penalties here.
+                # Values like -B 1000 cause integer overflow inside BWA's
+                # internal scoring for repetitive k-mers (e.g. poly-A prefix),
+                # leading BWA to report wrong primary alignments and miss the
+                # actual exact matches.  Exact-match filtering is handled
+                # entirely by _parse_sam_exact (CIGAR = {klen}M, NM = 0).
                 "-T", "0",     # min score threshold; we filter by CIGAR + NM
                 ref_path,
                 query_fa,
