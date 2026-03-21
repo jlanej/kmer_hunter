@@ -1291,11 +1291,6 @@ def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
                 u = int(is_unique.loc[grp_idx].sum())
                 unique_counts[region] = u
                 multi_counts[region] = len(grp_idx) - u
-            elif region in XTR_REGION_NAMES:
-                # Generic "XTR" gap hits are folded into the XTR bar
-                u = int(is_unique.loc[grp_idx].sum())
-                unique_counts["XTR"] = unique_counts.get("XTR", 0) + u
-                multi_counts["XTR"] = multi_counts.get("XTR", 0) + (len(grp_idx) - u)
 
     colors = [region_colors[r] for r in region_names]
 
@@ -1598,6 +1593,12 @@ def _build_summary_stats_html(
         for r in CHRY_DISPLAY_REGIONS:
             region_name = r["name"]
             color = r["color"]
+
+            # XTR1/XTR2 are rendered as indented sub-rows under the
+            # XTR (all) aggregate below; skip their standalone rows.
+            if region_name in ("XTR1", "XTR2"):
+                continue
+
             mask = chry_hits["region"] == region_name
             u = int((mask & is_unique).sum())
             m = int((mask & ~is_unique).sum())
@@ -1660,11 +1661,6 @@ def _build_summary_stats_html(
                         f"<td>{s_kmers}</td><td>{_pct(s_kmers, total_kmers)}</td>"
                         f"</tr>"
                     )
-
-            # Skip standalone XTR1/XTR2 rows since they are shown as
-            # sub-rows under the XTR (all) aggregate above.
-            if region_name in ("XTR1", "XTR2"):
-                rows.pop()  # remove the row we just appended
         region_rows_html = "\n        ".join(rows)
 
     kmers_with_hits = unique_kmer_count + multi_kmer_count
