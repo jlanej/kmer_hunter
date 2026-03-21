@@ -200,6 +200,31 @@ class TestAnnotateRegion(unittest.TestCase):
         self.assertEqual(kh.annotate_region("chrX", 500_000), "chrX")
 
 
+class TestXtrConstants(unittest.TestCase):
+    """Validate XTR-related module-level constants."""
+
+    def test_xtr_region_names_contents(self):
+        self.assertEqual(kh.XTR_REGION_NAMES, frozenset({"XTR", "XTR1", "XTR2"}))
+
+    def test_chry_display_regions_unique_names(self):
+        names = [r["name"] for r in kh.CHRY_DISPLAY_REGIONS]
+        self.assertEqual(len(names), len(set(names)), "CHRY_DISPLAY_REGIONS has duplicates")
+
+    def test_chry_display_regions_contains_xtr_sub_regions(self):
+        names = {r["name"] for r in kh.CHRY_DISPLAY_REGIONS}
+        self.assertIn("XTR", names)
+        self.assertIn("XTR1", names)
+        self.assertIn("XTR2", names)
+
+    def test_chry_regions_covers_full_xtr_span(self):
+        """All positions in the old XTR span should map to an XTR sub-region."""
+        for pos in [2_458_321, 2_727_072, 2_727_073, 5_914_561,
+                     5_914_562, 6_200_973, 6_200_974, 6_400_875]:
+            region = kh.annotate_region("chrY", pos)
+            self.assertIn(region, kh.XTR_REGION_NAMES,
+                          f"pos {pos} mapped to {region}, expected XTR sub-region")
+
+
 # ── find_exact_matches ─────────────────────────────────────────────────────────
 
 class TestFindExactMatches(unittest.TestCase):
@@ -1651,6 +1676,47 @@ class TestBuildSummaryStatsHtml(unittest.TestCase):
         html = kh._build_summary_stats_html(self._hits(), [("k1", "ACGT"), ("k2", "TTTT")])
         # PAR1 row should show 2 k-mers, 100.0%
         self.assertIn("100.0%", html)
+
+    def test_xtr_all_aggregate_row_present(self):
+        """Summary stats should contain an 'XTR (all)' aggregate row."""
+        hits = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 3_000_000, "end": 3_000_004, "strand": "+", "region": "XTR1"},
+        ])
+        html = kh._build_summary_stats_html(hits, [("k1", "ACGT")])
+        self.assertIn("XTR (all)", html)
+
+    def test_xtr1_and_xtr2_sub_rows_present(self):
+        """Summary stats should contain indented XTR1 and XTR2 sub-rows."""
+        hits = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 3_000_000, "end": 3_000_004, "strand": "+", "region": "XTR1"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 6_300_000, "end": 6_300_004, "strand": "+", "region": "XTR2"},
+        ])
+        html = kh._build_summary_stats_html(hits, [("k1", "ACGT"), ("k2", "TTTT")])
+        self.assertIn("XTR1", html)
+        self.assertIn("XTR2", html)
+        # Sub-rows are indented with arrow
+        self.assertIn("↳", html)
+
+    def test_xtr_all_aggregates_all_sub_regions(self):
+        """XTR (all) row should aggregate XTR + XTR1 + XTR2 counts."""
+        hits = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 2_500_000, "end": 2_500_004, "strand": "+", "region": "XTR"},
+            {"kmer": "k2", "seq": "TTTT", "chrom": "chrY",
+             "start": 3_000_000, "end": 3_000_004, "strand": "+", "region": "XTR1"},
+            {"kmer": "k3", "seq": "GGGG", "chrom": "chrY",
+             "start": 6_300_000, "end": 6_300_004, "strand": "+", "region": "XTR2"},
+        ])
+        all_kmers = [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")]
+        html = kh._build_summary_stats_html(hits, all_kmers)
+        # XTR (all) row should show 3 total hits and 3 k-mers
+        # Verify it contains the aggregate row with all three counts
+        self.assertIn("XTR (all)", html)
+        # Each k-mer is unique (1 hit each), so XTR(all) unique = 3
+        self.assertIn(">3<", html)
 
 
 
