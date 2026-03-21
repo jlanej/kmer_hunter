@@ -38,25 +38,30 @@ CHRY_LEN = 62_460_029  # T2T CHM13v2.0 (hs1) chrY length (bp)
 
 # ─── chrY functional-region annotations ──────────────────────────────────────
 # Coordinates: 1-based, inclusive.
-# Sources: Rhie et al. (2023) Nature (T2T-Y) and UCSC hs1 tracks.
+# Sources:
+#   PAR1/PAR2 — T2T Consortium (Heng Li), chm13v2.0_PAR.bed
+#     https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0_PAR.bed
+#   XTR — Melissa Wilson (Arizona State Univ.), via GIAB genome-stratifications v3.1
+#     https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb
+#   Other regions — Rhie et al. (2023) Nature 621, 344–354 (T2T-Y).
 CHRY_REGIONS = [
     {
         "name": "PAR1",
         "start": 1,
-        "end": 2_781_479,
+        "end": 2_458_320,
         "color": "#27ae60",
         "description": "Pseudoautosomal Region 1 (Yp telomere)",
     },
     {
         "name": "XTR",
-        "start": 2_781_480,
-        "end": 6_811_428,
+        "start": 2_458_321,
+        "end": 6_400_875,
         "color": "#2980b9",
         "description": "X-Transposed Region",
     },
     {
         "name": "Ampliconic",
-        "start": 6_811_429,
+        "start": 6_400_876,
         "end": 26_200_000,
         "color": "#8e44ad",
         "description": "Ampliconic sequences (Yp/Yq)",
@@ -76,18 +81,18 @@ CHRY_REGIONS = [
         "description": "Heterochromatin (DYZ1/DYZ2 satellites)",
     },
     {
-        "name": "PAR2",
-        "start": 56_887_902,
-        "end": 57_217_415,
-        "color": "#e67e22",
-        "description": "Pseudoautosomal Region 2 (Yq telomere)",
-    },
-    {
         "name": "Distal Yq",
-        "start": 57_217_416,
-        "end": CHRY_LEN,
+        "start": 56_887_902,
+        "end": 62_122_809,
         "color": "#bdc3c7",
         "description": "Distal Yq (T2T-resolved region)",
+    },
+    {
+        "name": "PAR2",
+        "start": 62_122_810,
+        "end": CHRY_LEN,
+        "color": "#e67e22",
+        "description": "Pseudoautosomal Region 2 (Yq telomere)",
     },
 ]
 
