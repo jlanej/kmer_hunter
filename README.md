@@ -22,8 +22,8 @@ With `--whole-genome`, the report additionally includes:
 
 - 🌐 **Non-chrY bar chart** — hit counts broken down by non-chrY chromosome,
   listed in natural genomic order (chr1, chr2, …, chr22, chrX, chrY, chrM).
-- 📋 **Non-chrY hit table** — all hits found outside chrY with chromosome,
-  coordinates, strand and k-mer sequence.
+- 📋 **Non-chrY sections** — a per-chromosome summary table plus a detailed
+  non-chrY hit table with k-mer, chromosome, coordinates, strand and sequence.
 - 🔢 **Non-chrY & chrY hit count cards** — at-a-glance comparison.
 
 > **Exact matches only** — both forward and reverse-complement strands are
