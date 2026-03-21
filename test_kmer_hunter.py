@@ -162,9 +162,21 @@ class TestAnnotateRegion(unittest.TestCase):
         self.assertEqual(kh.annotate_region("chrY", 1), "PAR1")
         self.assertEqual(kh.annotate_region("chrY", 2_458_320), "PAR1")
 
-    def test_xtr(self):
+    def test_xtr_gap_before(self):
         self.assertEqual(kh.annotate_region("chrY", 2_458_321), "XTR")
-        self.assertEqual(kh.annotate_region("chrY", 6_400_875), "XTR")
+        self.assertEqual(kh.annotate_region("chrY", 2_727_072), "XTR")
+
+    def test_xtr1(self):
+        self.assertEqual(kh.annotate_region("chrY", 2_727_073), "XTR1")
+        self.assertEqual(kh.annotate_region("chrY", 5_914_561), "XTR1")
+
+    def test_xtr_gap_between(self):
+        self.assertEqual(kh.annotate_region("chrY", 5_914_562), "XTR")
+        self.assertEqual(kh.annotate_region("chrY", 6_200_973), "XTR")
+
+    def test_xtr2(self):
+        self.assertEqual(kh.annotate_region("chrY", 6_200_974), "XTR2")
+        self.assertEqual(kh.annotate_region("chrY", 6_400_875), "XTR2")
 
     def test_ampliconic(self):
         self.assertEqual(kh.annotate_region("chrY", 6_400_876), "Ampliconic")
@@ -1516,7 +1528,7 @@ class TestGenerateHtml(unittest.TestCase):
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT"), ("k2", "TTTT")], out)
         content = Path(out).read_text()
         self.assertIn("PAR1 Unique Hits", content)
-        self.assertIn("XTR Unique Hits", content)
+        self.assertIn("XTR (all) Unique Hits", content)
         self.assertIn("PAR2 Unique Hits", content)
 
     def test_alignment_path_shown_in_output_files_section(self):
@@ -1582,7 +1594,7 @@ class TestBuildContextCardHtml(unittest.TestCase):
 
     def test_all_regions_listed(self):
         html = kh._build_context_card_html(5, False)
-        for r in ["PAR1", "XTR", "Ampliconic", "Pericentromeric", "Heterochromatin", "PAR2", "Distal Yq"]:
+        for r in ["PAR1", "XTR", "XTR1", "XTR2", "Ampliconic", "Pericentromeric", "Heterochromatin", "PAR2", "Distal Yq"]:
             self.assertIn(r, html)
 
     def test_unique_and_multi_hit_explained(self):
