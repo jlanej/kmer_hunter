@@ -81,9 +81,28 @@ TGCATGCATGCATGCATGCA
 | PAR2 | 🟠 Orange | 62,122,810 – 62,460,029 | Pseudoautosomal Region 2 (Yq telomere) |
 
 PAR coordinates from [chm13v2.0_PAR.bed](https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0_PAR.bed)
-(T2T Consortium). XTR coordinates from Melissa Wilson via
+(T2T Consortium, Heng Li). The chrY lines of that BED file read:
+
+```
+chrY  0         2458320   (PAR1)
+chrY  62122809  62460029  (PAR2)
+```
+
+XTR coordinates from Melissa Wilson (Arizona State Univ.) via
 [GIAB genome-stratifications v3.1](https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb).
-Other regions based on Rhie et al. (2023) *Nature*.
+The source file `CHM13XY_regions_from_Melissa.txt` defines two chrY XTR intervals:
+
+```
+HG002  chrY  2727072  5914561  XTR1
+HG002  chrY  6200973  6400875  XTR2
+```
+
+The table above merges these into a single contiguous span (2,458,321 – 6,400,875)
+for the region map.
+
+Ampliconic, Pericentromeric, Heterochromatin and Distal Yq boundaries are
+approximate, based on Rhie et al. (2023) *Nature* 621, 344–354, Fig. 1
+([doi:10.1038/s41586-023-06457-y](https://doi.org/10.1038/s41586-023-06457-y)).
 
 ---
 
