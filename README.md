@@ -16,7 +16,7 @@ visually rich, fully interactive HTML report containing:
   functional region, with **Unique Hits** (k-mers mapping exactly once
   genome-wide, shown in the region colour) and **Multi-Hit** (k-mers with two
   or more genome-wide matches, shown in grey) distinguished by colour.
-- 🔢 **Summary cards** — total k-mers, total hits, and unique hit counts for PAR1 / XTR (all) / PAR2 (coloured to match the bar chart).
+- 🔢 **Summary cards** — total k-mers, total hits, and unique hit counts for PAR1 / XTR / PAR2 (coloured to match the bar chart).
 
 With `--whole-genome`, the report additionally includes:
 
@@ -73,10 +73,9 @@ TGCATGCATGCATGCATGCA
 | Region | Colour | Coordinates (T2T hs1, approx.) | Description |
 |---|---|---|---|
 | PAR1 | 🟢 Green | 1 – 2,458,320 | Pseudoautosomal Region 1 (Yp telomere) |
-| XTR | 🔵 Blue | 2,458,321 – 2,727,072 | X-Transposed Region (gap before XTR1) |
-| XTR1 | 🔵 Light blue | 2,727,073 – 5,914,561 | X-Transposed Region 1 |
-| XTR | 🔵 Blue | 5,914,562 – 6,200,973 | X-Transposed Region (gap between XTR1 & XTR2) |
-| XTR2 | 🔵 Dark blue | 6,200,974 – 6,400,875 | X-Transposed Region 2 |
+| XTR | 🔵 Blue | 2,458,321 – 6,400,875 | X-Transposed Region |
+| ↳ XTR1 | 🔵 Light blue | 2,727,073 – 5,914,561 | X-Transposed Region 1 |
+| ↳ XTR2 | 🔵 Dark blue | 6,200,974 – 6,400,875 | X-Transposed Region 2 |
 | Ampliconic | 🟣 Purple | 6,400,876 – 26,200,000 | Ampliconic sequences |
 | Pericentromeric | 🔴 Red | 26,200,001 – 27,800,000 | Pericentromeric / Centromere |
 | Heterochromatin | ⚫ Grey | 27,800,001 – 56,887,901 | Heterochromatin (DYZ1/DYZ2) |
@@ -104,9 +103,10 @@ HG002  chrY  6200973  6400875  XTR2
 ```
 
 K-mers falling inside one of these defined intervals are labelled **XTR1** or
-**XTR2**; positions in the gaps before XTR1 (2,458,321 – 2,727,072) and between
-XTR1 and XTR2 (5,914,562 – 6,200,973) are labelled generic **XTR**.  Summary
-statistics include an **XTR (all)** aggregate that combines XTR + XTR1 + XTR2.
+**XTR2**; all other positions in the XTR span (2,458,321 – 6,400,875) are
+labelled **XTR**.  In the summary statistics table, **XTR** shows the aggregate
+count across the entire XTR region, with **XTR1** and **XTR2** broken out as
+indented sub-rows.
 
 Ampliconic, Pericentromeric, Heterochromatin and Distal Yq boundaries are
 approximate, based on Rhie et al. (2023) *Nature* 621, 344–354, Fig. 1

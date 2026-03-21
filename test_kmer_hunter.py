@@ -210,14 +210,25 @@ class TestXtrConstants(unittest.TestCase):
         names = [r["name"] for r in kh.CHRY_DISPLAY_REGIONS]
         self.assertEqual(len(names), len(set(names)), "CHRY_DISPLAY_REGIONS has duplicates")
 
-    def test_chry_display_regions_contains_xtr_sub_regions(self):
+    def test_chry_display_regions_has_xtr_full_span(self):
+        """CHRY_DISPLAY_REGIONS should contain XTR covering the full span."""
+        xtr = next(r for r in kh.CHRY_DISPLAY_REGIONS if r["name"] == "XTR")
+        self.assertEqual(xtr["start"], 2_458_321)
+        self.assertEqual(xtr["end"], 6_400_875)
+
+    def test_chry_display_regions_does_not_contain_xtr1_xtr2(self):
+        """XTR1/XTR2 are sub-regions and should NOT be in CHRY_DISPLAY_REGIONS."""
         names = {r["name"] for r in kh.CHRY_DISPLAY_REGIONS}
-        self.assertIn("XTR", names)
-        self.assertIn("XTR1", names)
-        self.assertIn("XTR2", names)
+        self.assertNotIn("XTR1", names)
+        self.assertNotIn("XTR2", names)
+
+    def test_xtr_sub_regions(self):
+        """XTR_SUB_REGIONS should contain XTR1 and XTR2."""
+        names = [r["name"] for r in kh.XTR_SUB_REGIONS]
+        self.assertEqual(names, ["XTR1", "XTR2"])
 
     def test_chry_regions_covers_full_xtr_span(self):
-        """All positions in the old XTR span should map to an XTR sub-region."""
+        """All positions in the XTR span should map to an XTR sub-region."""
         for pos in [2_458_321, 2_727_072, 2_727_073, 5_914_561,
                      5_914_562, 6_200_973, 6_200_974, 6_400_875]:
             region = kh.annotate_region("chrY", pos)
@@ -1553,7 +1564,7 @@ class TestGenerateHtml(unittest.TestCase):
         kh.generate_html(karyogram, region_bar, hits_df, [("k1", "ACGT"), ("k2", "TTTT")], out)
         content = Path(out).read_text()
         self.assertIn("PAR1 Unique Hits", content)
-        self.assertIn("XTR (all) Unique Hits", content)
+        self.assertIn("XTR Unique Hits", content)
         self.assertIn("PAR2 Unique Hits", content)
 
     def test_alignment_path_shown_in_output_files_section(self):
@@ -1677,14 +1688,14 @@ class TestBuildSummaryStatsHtml(unittest.TestCase):
         # PAR1 row should show 2 k-mers, 100.0%
         self.assertIn("100.0%", html)
 
-    def test_xtr_all_aggregate_row_present(self):
-        """Summary stats should contain an 'XTR (all)' aggregate row."""
+    def test_xtr_aggregate_row_present(self):
+        """Summary stats should contain an XTR aggregate row."""
         hits = pd.DataFrame([
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
              "start": 3_000_000, "end": 3_000_004, "strand": "+", "region": "XTR1"},
         ])
         html = kh._build_summary_stats_html(hits, [("k1", "ACGT")])
-        self.assertIn("XTR (all)", html)
+        self.assertIn(">XTR<", html)
 
     def test_xtr1_and_xtr2_sub_rows_present(self):
         """Summary stats should contain indented XTR1 and XTR2 sub-rows."""
@@ -1700,8 +1711,8 @@ class TestBuildSummaryStatsHtml(unittest.TestCase):
         # Sub-rows are indented with arrow
         self.assertIn("↳", html)
 
-    def test_xtr_all_aggregates_all_sub_regions(self):
-        """XTR (all) row should aggregate XTR + XTR1 + XTR2 counts."""
+    def test_xtr_aggregates_all_sub_regions(self):
+        """XTR row should aggregate XTR + XTR1 + XTR2 counts."""
         hits = pd.DataFrame([
             {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
              "start": 2_500_000, "end": 2_500_004, "strand": "+", "region": "XTR"},
@@ -1712,10 +1723,9 @@ class TestBuildSummaryStatsHtml(unittest.TestCase):
         ])
         all_kmers = [("k1", "ACGT"), ("k2", "TTTT"), ("k3", "GGGG")]
         html = kh._build_summary_stats_html(hits, all_kmers)
-        # XTR (all) row should show 3 total hits and 3 k-mers
-        # Verify it contains the aggregate row with all three counts
-        self.assertIn("XTR (all)", html)
-        # Each k-mer is unique (1 hit each), so XTR(all) unique = 3
+        # XTR row should show 3 total hits and 3 k-mers
+        self.assertIn(">XTR<", html)
+        # Each k-mer is unique (1 hit each), so XTR unique = 3
         self.assertIn(">3<", html)
 
 
