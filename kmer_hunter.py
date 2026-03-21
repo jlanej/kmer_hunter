@@ -38,12 +38,31 @@ CHRY_LEN = 62_460_029  # T2T CHM13v2.0 (hs1) chrY length (bp)
 
 # ─── chrY functional-region annotations ──────────────────────────────────────
 # Coordinates: 1-based, inclusive.
-# Sources:
-#   PAR1/PAR2 — T2T Consortium (Heng Li), chm13v2.0_PAR.bed
+#
+# Sources & verification
+# ~~~~~~~~~~~~~~~~~~~~~~
+# PAR1/PAR2 — T2T Consortium (Heng Li), chm13v2.0_PAR.bed (BED: 0-based
+#   start, half-open end).  chrY PAR lines from the file:
+#     chrY  0         2458320    → 1-based 1 – 2,458,320  (PAR1)
+#     chrY  62122809  62460029   → 1-based 62,122,810 – 62,460,029  (PAR2)
+#   Download:
 #     https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0_PAR.bed
-#   XTR — Melissa Wilson (Arizona State Univ.), via GIAB genome-stratifications v3.1
+#
+# XTR — Melissa Wilson (Arizona State Univ.), via GIAB genome-stratifications
+#   v3.1.  The source file CHM13XY_regions_from_Melissa.txt defines two
+#   non-contiguous XTR intervals on chrY (BED coords):
+#     HG002  chrY  2727072  5914561  XTR1  → 1-based 2,727,073 – 5,914,561
+#     HG002  chrY  6200973  6400875  XTR2  → 1-based 6,200,974 – 6,400,875
+#   For the contiguous region map used here, the XTR span is simplified to
+#   PAR1-end+1 through XTR2-end (2,458,321 – 6,400,875), which covers both
+#   XTR sub-regions plus ~269 kb before XTR1 and ~286 kb between them.
+#   Notebook:
 #     https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb
-#   Other regions — Rhie et al. (2023) Nature 621, 344–354 (T2T-Y).
+#
+# Ampliconic / Pericentromeric / Heterochromatin / Distal Yq — approximate
+#   boundaries derived from Rhie et al. (2023) "The complete sequence of a
+#   human Y chromosome", Nature 621, 344–354, Fig. 1.
+#   https://doi.org/10.1038/s41586-023-06457-y
 CHRY_REGIONS = [
     {
         "name": "PAR1",
@@ -1454,7 +1473,9 @@ def _build_context_card_html(
     <p>
       <strong>kmer_hunter</strong> searched <strong>{total_kmers:,}&nbsp;k-mer{'s' if total_kmers != 1 else ''}</strong>
       for exact, zero-mismatch occurrences in {scope}
-      (Rhie&nbsp;et&nbsp;al.&nbsp;2023&nbsp;<em>Nature</em>&nbsp;621,&nbsp;344–354).
+      (Rhie&nbsp;et&nbsp;al.&nbsp;2023&nbsp;<em>Nature</em>&nbsp;621,&nbsp;344–354;
+      <a href="https://doi.org/10.1038/s41586-023-06457-y" target="_blank"
+         style="color:#2980b9;text-decoration:none">doi:10.1038/s41586-023-06457-y</a>).
       Both the forward strand and its reverse complement were scanned;
       every occurrence — including overlapping ones — is reported.
     </p>
