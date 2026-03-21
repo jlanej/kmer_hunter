@@ -160,14 +160,14 @@ class TestReadFasta(unittest.TestCase):
 class TestAnnotateRegion(unittest.TestCase):
     def test_par1(self):
         self.assertEqual(kh.annotate_region("chrY", 1), "PAR1")
-        self.assertEqual(kh.annotate_region("chrY", 2_781_479), "PAR1")
+        self.assertEqual(kh.annotate_region("chrY", 2_458_320), "PAR1")
 
     def test_xtr(self):
-        self.assertEqual(kh.annotate_region("chrY", 2_781_480), "XTR")
-        self.assertEqual(kh.annotate_region("chrY", 6_811_428), "XTR")
+        self.assertEqual(kh.annotate_region("chrY", 2_458_321), "XTR")
+        self.assertEqual(kh.annotate_region("chrY", 6_400_875), "XTR")
 
     def test_ampliconic(self):
-        self.assertEqual(kh.annotate_region("chrY", 6_811_429), "Ampliconic")
+        self.assertEqual(kh.annotate_region("chrY", 6_400_876), "Ampliconic")
 
     def test_pericentromeric(self):
         self.assertEqual(kh.annotate_region("chrY", 26_200_001), "Pericentromeric")
@@ -175,12 +175,13 @@ class TestAnnotateRegion(unittest.TestCase):
     def test_heterochromatin(self):
         self.assertEqual(kh.annotate_region("chrY", 27_800_001), "Heterochromatin")
 
-    def test_par2(self):
-        self.assertEqual(kh.annotate_region("chrY", 56_887_902), "PAR2")
-
     def test_distal_yq(self):
-        self.assertEqual(kh.annotate_region("chrY", 57_217_416), "Distal Yq")
-        self.assertEqual(kh.annotate_region("chrY", kh.CHRY_LEN), "Distal Yq")
+        self.assertEqual(kh.annotate_region("chrY", 56_887_902), "Distal Yq")
+        self.assertEqual(kh.annotate_region("chrY", 62_122_809), "Distal Yq")
+
+    def test_par2(self):
+        self.assertEqual(kh.annotate_region("chrY", 62_122_810), "PAR2")
+        self.assertEqual(kh.annotate_region("chrY", kh.CHRY_LEN), "PAR2")
 
     def test_non_chry_returns_chrom_name(self):
         self.assertEqual(kh.annotate_region("chr1", 1000), "chr1")

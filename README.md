@@ -72,16 +72,18 @@ TGCATGCATGCATGCATGCA
 
 | Region | Colour | Coordinates (T2T hs1, approx.) | Description |
 |---|---|---|---|
-| PAR1 | 🟢 Green | 1 – 2,781,479 | Pseudoautosomal Region 1 (Yp telomere) |
-| XTR | 🔵 Blue | 2,781,480 – 6,811,428 | X-Transposed Region |
-| Ampliconic | 🟣 Purple | 6,811,429 – 26,200,000 | Ampliconic sequences |
+| PAR1 | 🟢 Green | 1 – 2,458,320 | Pseudoautosomal Region 1 (Yp telomere) |
+| XTR | 🔵 Blue | 2,458,321 – 6,400,875 | X-Transposed Region |
+| Ampliconic | 🟣 Purple | 6,400,876 – 26,200,000 | Ampliconic sequences |
 | Pericentromeric | 🔴 Red | 26,200,001 – 27,800,000 | Pericentromeric / Centromere |
 | Heterochromatin | ⚫ Grey | 27,800,001 – 56,887,901 | Heterochromatin (DYZ1/DYZ2) |
-| PAR2 | 🟠 Orange | 56,887,902 – 57,217,415 | Pseudoautosomal Region 2 (Yq telomere) |
-| Distal Yq | 🔘 Light grey | 57,217,416 – 62,460,029 | Distal Yq (T2T-resolved) |
+| Distal Yq | 🔘 Light grey | 56,887,902 – 62,122,809 | Distal Yq (T2T-resolved) |
+| PAR2 | 🟠 Orange | 62,122,810 – 62,460,029 | Pseudoautosomal Region 2 (Yq telomere) |
 
-Coordinates are approximate; based on Rhie et al. (2023) *Nature* and UCSC hs1
-genome browser tracks.
+PAR coordinates from [chm13v2.0_PAR.bed](https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/analysis_set/chm13v2.0_PAR.bed)
+(T2T Consortium). XTR coordinates from Melissa Wilson via
+[GIAB genome-stratifications v3.1](https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb).
+Other regions based on Rhie et al. (2023) *Nature*.
 
 ---
 
