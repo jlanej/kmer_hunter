@@ -1730,6 +1730,7 @@ def generate_html(
     output_path: str,
     non_chry_bar: go.Figure | None = None,
     non_chry_summary: go.Figure | None = None,
+    non_chry_table: go.Figure | None = None,
     intervals_df: pd.DataFrame | None = None,
     alignment_path: str | None = None,
     multi_match_report: str | None = None,
@@ -1739,8 +1740,9 @@ def generate_html(
 
     Optional companion-file paths (*alignment_path*, *multi_match_report*,
     *non_chry_report*) are surfaced in an "Output Files" card so the reader
-    knows where the full hit listings live.  Pass *non_chry_bar* and
-    *non_chry_summary* to enable the whole-genome non-chrY section.
+    knows where the full hit listings live.  Pass *non_chry_bar*,
+    *non_chry_summary* and/or *non_chry_table* to enable the whole-genome
+    non-chrY section.
     """
     total_kmers = len(all_kmers)
     total_hits = len(hits_df)
@@ -1839,6 +1841,17 @@ def generate_html(
       <h2>Non-chrY Hits by Chromosome</h2>
       {non_chry_bar_html}
       {non_chry_file_note}
+    </div>"""
+        if non_chry_table is not None:
+            non_chry_table_html = to_html(
+                non_chry_table, full_html=False, include_plotlyjs=False
+            )
+            non_chry_section += f"""
+
+    <!-- Non-chrY exact hit details -->
+    <div class="card">
+      <h2>Non-chrY Exact Hit Details</h2>
+      {non_chry_table_html}
     </div>"""
         genome_subtitle = "T2T CHM13v2.0 Full Genome — Exact k-mer Mapping Report"
     else:
@@ -2115,6 +2128,7 @@ def main() -> None:
     )
     non_chry_bar = build_non_chry_bar(non_chry_df)
     non_chry_summary = build_non_chry_summary(all_hits_df)
+    non_chry_table = build_non_chry_table(all_hits_df)
 
     # 7. Build figures (pass intervals for count y-axis karyogram)
     karyogram = build_karyogram(all_hits_df, intervals_df=intervals_df)
@@ -2129,6 +2143,7 @@ def main() -> None:
         args.output,
         non_chry_bar=non_chry_bar,
         non_chry_summary=non_chry_summary,
+        non_chry_table=non_chry_table,
         intervals_df=intervals_df,
         alignment_path=actual_alignment_path,
         multi_match_report=multi_match_report,

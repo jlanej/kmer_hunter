@@ -1611,6 +1611,32 @@ class TestGenerateHtml(unittest.TestCase):
         content = Path(out).read_text()
         self.assertIn("About This Report", content)
 
+    def test_whole_genome_non_chry_detail_table_section_present_when_provided(self):
+        hits_df = pd.DataFrame([
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chrY",
+             "start": 100, "end": 104, "strand": "+", "region": "PAR1"},
+            {"kmer": "k1", "seq": "ACGT", "chrom": "chr1",
+             "start": 500, "end": 504, "strand": "+", "region": "chr1"},
+        ])
+        out = str(self.tmpdir / "report.html")
+        karyogram = kh.build_karyogram(hits_df)
+        region_bar = kh.build_region_bar(hits_df)
+        non_chry_bar = kh.build_non_chry_bar(hits_df)
+        non_chry_summary = kh.build_non_chry_summary(hits_df)
+        non_chry_table = kh.build_non_chry_table(hits_df)
+        kh.generate_html(
+            karyogram,
+            region_bar,
+            hits_df,
+            [("k1", "ACGT")],
+            out,
+            non_chry_bar=non_chry_bar,
+            non_chry_summary=non_chry_summary,
+            non_chry_table=non_chry_table,
+        )
+        content = Path(out).read_text()
+        self.assertIn("Non-chrY Exact Hit Details", content)
+
 
 class TestBuildContextCardHtml(unittest.TestCase):
     """Tests for _build_context_card_html()."""
