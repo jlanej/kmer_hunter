@@ -74,6 +74,8 @@ TGCATGCATGCATGCATGCA
 |---|---|---|---|
 | PAR1 | 🟢 Green | 1 – 2,458,320 | Pseudoautosomal Region 1 (Yp telomere) |
 | XTR | 🔵 Blue | 2,458,321 – 6,400,875 | X-Transposed Region |
+| ↳ XTR1 | 🔵 Light blue | 2,727,073 – 5,914,561 | X-Transposed Region 1 |
+| ↳ XTR2 | 🔵 Dark blue | 6,200,974 – 6,400,875 | X-Transposed Region 2 |
 | Ampliconic | 🟣 Purple | 6,400,876 – 26,200,000 | Ampliconic sequences |
 | Pericentromeric | 🔴 Red | 26,200,001 – 27,800,000 | Pericentromeric / Centromere |
 | Heterochromatin | ⚫ Grey | 27,800,001 – 56,887,901 | Heterochromatin (DYZ1/DYZ2) |
@@ -89,7 +91,10 @@ chrY  62122809  62460029  (PAR2)
 ```
 
 XTR coordinates from Melissa Wilson (Arizona State Univ.) via
-[GIAB genome-stratifications v3.1](https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb).
+[GIAB genome-stratifications v3.1](https://github.com/genome-in-a-bottle/genome-stratifications/blob/master/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb).
+The released chrY XTR BED file is available at
+[`CHM13v2.0_chrY_XTR.bed.gz`](https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/v3.1/CHM13v2.0/CHM13v2.0_chrY_XTR.bed.gz)
+on the NCBI FTP.
 The source file `CHM13XY_regions_from_Melissa.txt` defines two chrY XTR intervals:
 
 ```
@@ -97,8 +102,11 @@ HG002  chrY  2727072  5914561  XTR1
 HG002  chrY  6200973  6400875  XTR2
 ```
 
-The table above merges these into a single contiguous span (2,458,321 – 6,400,875)
-for the region map.
+K-mers falling inside one of these defined intervals are labelled **XTR1** or
+**XTR2**; all other positions in the XTR span (2,458,321 – 6,400,875) are
+labelled **XTR**.  In the summary statistics table, **XTR** shows the aggregate
+count across the entire XTR region, with **XTR1** and **XTR2** broken out as
+indented sub-rows.
 
 Ampliconic, Pericentromeric, Heterochromatin and Distal Yq boundaries are
 approximate, based on Rhie et al. (2023) *Nature* 621, 344–354, Fig. 1

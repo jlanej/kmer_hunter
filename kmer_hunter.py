@@ -53,11 +53,14 @@ CHRY_LEN = 62_460_029  # T2T CHM13v2.0 (hs1) chrY length (bp)
 #   non-contiguous XTR intervals on chrY (BED coords):
 #     HG002  chrY  2727072  5914561  XTR1  → 1-based 2,727,073 – 5,914,561
 #     HG002  chrY  6200973  6400875  XTR2  → 1-based 6,200,974 – 6,400,875
-#   For the contiguous region map used here, the XTR span is simplified to
-#   PAR1-end+1 through XTR2-end (2,458,321 – 6,400,875), which covers both
-#   XTR sub-regions plus ~269 kb before XTR1 and ~286 kb between them.
+#   The full XTR span runs from PAR1-end+1 through XTR2-end (2,458,321 –
+#   6,400,875).  Within that span, positions that fall inside one of the two
+#   defined intervals are labelled XTR1 or XTR2; the ~269 kb gap before XTR1
+#   and the ~286 kb gap between XTR1 and XTR2 are labelled generic "XTR".
 #   Notebook:
-#     https://github.com/genome-in-a-bottle/genome-stratifications/blob/main/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb
+#     https://github.com/genome-in-a-bottle/genome-stratifications/blob/master/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb
+#   Released chrY XTR BED:
+#     https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/v3.1/CHM13v2.0/CHM13v2.0_chrY_XTR.bed.gz
 #
 # Ampliconic / Pericentromeric / Heterochromatin / Distal Yq — approximate
 #   boundaries derived from Rhie et al. (2023) "The complete sequence of a
@@ -74,9 +77,30 @@ CHRY_REGIONS = [
     {
         "name": "XTR",
         "start": 2_458_321,
-        "end": 6_400_875,
+        "end": 2_727_072,
         "color": "#2980b9",
-        "description": "X-Transposed Region",
+        "description": "X-Transposed Region (gap before XTR1)",
+    },
+    {
+        "name": "XTR1",
+        "start": 2_727_073,
+        "end": 5_914_561,
+        "color": "#3498db",
+        "description": "X-Transposed Region 1",
+    },
+    {
+        "name": "XTR",
+        "start": 5_914_562,
+        "end": 6_200_973,
+        "color": "#2980b9",
+        "description": "X-Transposed Region (gap between XTR1 & XTR2)",
+    },
+    {
+        "name": "XTR2",
+        "start": 6_200_974,
+        "end": 6_400_875,
+        "color": "#1f618d",
+        "description": "X-Transposed Region 2",
     },
     {
         "name": "Ampliconic",
@@ -113,6 +137,31 @@ CHRY_REGIONS = [
         "color": "#e67e22",
         "description": "Pseudoautosomal Region 2 (Yq telomere)",
     },
+]
+
+# Names of all XTR-related sub-regions.  Used to aggregate XTR1 + XTR2 +
+# generic gap ("XTR") into a single XTR total in summary stats.
+XTR_REGION_NAMES = frozenset({"XTR", "XTR1", "XTR2"})
+
+# Major display regions for bar charts and karyogram legend.  XTR is shown
+# as a single bar covering the full span (2,458,321 – 6,400,875); hits
+# annotated as XTR, XTR1 or XTR2 are all aggregated into this bar.
+CHRY_DISPLAY_REGIONS: list[dict] = [
+    r for r in CHRY_REGIONS if r["name"] not in XTR_REGION_NAMES
+]
+CHRY_DISPLAY_REGIONS.insert(1, {
+    "name": "XTR",
+    "start": 2_458_321,
+    "end": 6_400_875,
+    "color": "#2980b9",
+    "description": "X-Transposed Region",
+})
+
+# Sub-region definitions for the two defined XTR intervals from the GIAB
+# source BED.  Shown as indented rows beneath XTR in the summary table and
+# context card.
+XTR_SUB_REGIONS: list[dict] = [
+    r for r in CHRY_REGIONS if r["name"] in ("XTR1", "XTR2")
 ]
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────
@@ -985,8 +1034,13 @@ def build_karyogram(
         layer="below",
     )
 
-    # Invisible legend entries for region colours
-    for region in CHRY_REGIONS:
+    # Invisible legend entries for region colours (including XTR sub-regions)
+    _legend_regions = []
+    for region in CHRY_DISPLAY_REGIONS:
+        _legend_regions.append(region)
+        if region["name"] == "XTR":
+            _legend_regions.extend(XTR_SUB_REGIONS)
+    for region in _legend_regions:
         fig.add_trace(
             go.Scatter(
                 x=[None],
@@ -1235,8 +1289,8 @@ def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
         else pd.DataFrame()
     )
 
-    region_names = [r["name"] for r in CHRY_REGIONS]
-    region_colors = {r["name"]: r["color"] for r in CHRY_REGIONS}
+    region_names = [r["name"] for r in CHRY_DISPLAY_REGIONS]
+    region_colors = {r["name"]: r["color"] for r in CHRY_DISPLAY_REGIONS}
     unique_counts: dict[str, int] = {r: 0 for r in region_names}
     multi_counts: dict[str, int] = {r: 0 for r in region_names}
 
@@ -1249,8 +1303,13 @@ def build_region_bar(hits_df: pd.DataFrame) -> go.Figure:
         for region, grp_idx in chry_hits.groupby("region").groups.items():
             if region in unique_counts:
                 u = int(is_unique.loc[grp_idx].sum())
-                unique_counts[region] = u
-                multi_counts[region] = len(grp_idx) - u
+                unique_counts[region] += u
+                multi_counts[region] += len(grp_idx) - u
+            elif region in XTR_REGION_NAMES and "XTR" in unique_counts:
+                # XTR1/XTR2 hits are folded into the aggregate XTR bar
+                u = int(is_unique.loc[grp_idx].sum())
+                unique_counts["XTR"] += u
+                multi_counts["XTR"] += len(grp_idx) - u
 
     colors = [region_colors[r] for r in region_names]
 
@@ -1457,17 +1516,33 @@ def _build_context_card_html(
         else "the T2T CHM13v2.0 <strong>chrY</strong> sequence"
     )
 
-    region_rows = "\n          ".join(
-        f'<tr>'
-        f'<td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
-        f'background:{r["color"]};vertical-align:middle"></span></td>'
-        f'<td><strong>{r["name"]}</strong></td>'
-        f'<td style="color:#7f8c8d;font-size:0.82rem">'
-        f'{r["start"]:,}&nbsp;–&nbsp;{r["end"]:,}</td>'
-        f'<td>{r["description"]}</td>'
-        f'</tr>'
-        for r in CHRY_REGIONS
-    )
+    # Build region rows: major regions from CHRY_DISPLAY_REGIONS, with
+    # XTR1/XTR2 sub-entries indented beneath the XTR row.
+    _rows: list[str] = []
+    for r in CHRY_DISPLAY_REGIONS:
+        _rows.append(
+            f'<tr>'
+            f'<td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
+            f'background:{r["color"]};vertical-align:middle"></span></td>'
+            f'<td><strong>{r["name"]}</strong></td>'
+            f'<td style="color:#7f8c8d;font-size:0.82rem">'
+            f'{r["start"]:,}&nbsp;–&nbsp;{r["end"]:,}</td>'
+            f'<td>{r["description"]}</td>'
+            f'</tr>'
+        )
+        if r["name"] == "XTR":
+            for sub in XTR_SUB_REGIONS:
+                _rows.append(
+                    f'<tr>'
+                    f'<td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;'
+                    f'background:{sub["color"]};vertical-align:middle"></span></td>'
+                    f'<td>&nbsp;&nbsp;↳&nbsp;<strong>{sub["name"]}</strong></td>'
+                    f'<td style="color:#7f8c8d;font-size:0.82rem">'
+                    f'{sub["start"]:,}&nbsp;–&nbsp;{sub["end"]:,}</td>'
+                    f'<td>{sub["description"]}</td>'
+                    f'</tr>'
+                )
+    region_rows = "\n          ".join(_rows)
 
     return f"""
     <p>
@@ -1493,7 +1568,14 @@ def _build_context_card_html(
       </li>
     </ul>
     <p style="margin-bottom:0.5rem">
-      The chrY sequence is divided into seven functional regions annotated below.
+      The chrY sequence is divided into functional regions annotated below.
+      The X-Transposed Region (XTR) is further split into XTR1 and XTR2
+      based on coordinates from Melissa Wilson (Arizona State Univ.) via
+      <a href="https://github.com/genome-in-a-bottle/genome-stratifications/blob/master/CHM13v2.0/XY/T2T-CHM13v2.0_XY-stratifications.ipynb"
+         target="_blank" style="color:#2980b9;text-decoration:none">GIAB genome-stratifications v3.1</a>
+      (released BED:
+      <a href="https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/genome-stratifications/v3.1/CHM13v2.0/CHM13v2.0_chrY_XTR.bed.gz"
+         target="_blank" style="color:#2980b9;text-decoration:none">CHM13v2.0_chrY_XTR.bed.gz</a>).
       Hover over any chart element for position and region details; use legend
       toggles to switch between unique-only and all-hit views.
     </p>
@@ -1543,14 +1625,18 @@ def _build_summary_stats_html(
         kmers_any_chry = chry_hits["kmer"].nunique()
 
         rows: list[str] = []
-        for r in CHRY_REGIONS:
+        for r in CHRY_DISPLAY_REGIONS:
             region_name = r["name"]
             color = r["color"]
-            mask = chry_hits["region"] == region_name
+
+            # For the XTR row, aggregate all XTR sub-region hits
+            if region_name == "XTR":
+                mask = chry_hits["region"].isin(XTR_REGION_NAMES)
+            else:
+                mask = chry_hits["region"] == region_name
             u = int((mask & is_unique).sum())
             m = int((mask & ~is_unique).sum())
             tot = u + m
-            # distinct queried k-mers with ≥1 hit in this region
             kmers_here = int(chry_hits.loc[mask, "kmer"].nunique())
             swatch = (
                 f'<span style="display:inline-block;width:12px;height:12px;'
@@ -1566,6 +1652,29 @@ def _build_summary_stats_html(
                 f"<td>{kmers_here}</td><td>{_pct(kmers_here, total_kmers)}</td>"
                 f"</tr>"
             )
+
+            # After the XTR row, insert indented XTR1 and XTR2 sub-rows.
+            if region_name == "XTR":
+                for sub in XTR_SUB_REGIONS:
+                    sub_mask = chry_hits["region"] == sub["name"]
+                    su = int((sub_mask & is_unique).sum())
+                    sm = int((sub_mask & ~is_unique).sum())
+                    stot = su + sm
+                    s_kmers = int(chry_hits.loc[sub_mask, "kmer"].nunique())
+                    sub_swatch = (
+                        f'<span style="display:inline-block;width:12px;height:12px;'
+                        f'border-radius:3px;background:{sub["color"]};'
+                        f'vertical-align:middle;margin-right:6px"></span>'
+                    )
+                    rows.append(
+                        f"<tr>"
+                        f"<td>&nbsp;&nbsp;↳&nbsp;{sub_swatch}{sub['name']}</td>"
+                        f"<td>{su}</td><td>{_pct(su, total_chry_unique)}</td>"
+                        f"<td>{sm}</td><td>{_pct(sm, total_chry_multi)}</td>"
+                        f"<td>{stot}</td>"
+                        f"<td>{s_kmers}</td><td>{_pct(s_kmers, total_kmers)}</td>"
+                        f"</tr>"
+                    )
         region_rows_html = "\n        ".join(rows)
 
     kmers_with_hits = unique_kmer_count + multi_kmer_count
@@ -1649,7 +1758,7 @@ def generate_html(
         unique_kmers = set(kmer_hit_counts[kmer_hit_counts == 1].index)
         is_unique_hit = chry_hits["kmer"].isin(unique_kmers)
         par1_unique = int(((chry_hits["region"] == "PAR1") & is_unique_hit).sum())
-        xtr_unique = int(((chry_hits["region"] == "XTR") & is_unique_hit).sum())
+        xtr_unique = int((chry_hits["region"].isin(XTR_REGION_NAMES) & is_unique_hit).sum())
         par2_unique = int(((chry_hits["region"] == "PAR2") & is_unique_hit).sum())
     else:
         par1_unique = xtr_unique = par2_unique = 0
@@ -1674,10 +1783,16 @@ def generate_html(
     summary_stats_html = _build_summary_stats_html(hits_df, all_kmers)
     context_card_html = _build_context_card_html(total_kmers, whole_genome_mode)
 
+    # Region pills: major regions plus XTR1/XTR2 sub-regions
+    _pill_regions = []
+    for r in CHRY_DISPLAY_REGIONS:
+        _pill_regions.append(r)
+        if r["name"] == "XTR":
+            _pill_regions.extend(XTR_SUB_REGIONS)
     region_pills = "".join(
         f'<span class="region-pill" style="background:{r["color"]}" '
         f'title="{r["description"]}">{r["name"]}</span>'
-        for r in CHRY_REGIONS
+        for r in _pill_regions
     )
 
     # Build the non-chrY section only when whole-genome mode is active
